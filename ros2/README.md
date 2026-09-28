@@ -192,6 +192,10 @@ POSIX 的 `nfds` 必须是 **max_fd + 1**，传 0 等于"一个描述符都不�
 
 ## 下一步
 
-- `rclcpp::Node` → `LifecycleNode` + component composition（受控启停、零拷贝 intra-process）
-- 跨机接真板：Windows 侧串口网关 → VM 桥（先验防火墙与 COM4 占用）
+- **intra-process 通信**（本轮没做也不吹）：同容器内的 `/dmp/frames` 仍走 DDS，组件化只省下
+  “每设备一份进程 + 一份 DDS 参与者”那笔固定开销。开 `use_intra_process_comms` 后，
+  先用本轮同一套可证伪判据（基线自然节律 + 停顿计数）量它到底省不省，**不拿它当默认答案**。
+- **网关端点可按设备覆盖**：现在 `gateway_host` 全设备共用一个参数，所以没法人为制造
+  “某一台连接黑洞 ⇒ 单个回调阻塞数秒”——而那是唯一可能让 `st` 真正输掉场景的边界（ADR-003 已列为未覆盖项）。
+- **错误隔离**：组合容器里一个组件 `on_configure` 失败会不会连累同容器其它组件（R-008 的姊妹项）。
 - `/dmp/frames` → `topic_to_ptp`/`pose_broadcaster` 一类的下游联动

@@ -212,7 +212,7 @@ run_ab false st
 
 show() {  # show <tag> —— 打印 bed02 在空载/被阻塞两种情形下的最大间隔
   python3 - "$1" "$LOG" <<'PY'
-import json, sys
+import json, re, sys
 tag, d = sys.argv[1], sys.argv[2]
 def g(f):
     try:
@@ -231,16 +231,25 @@ hh = h()
 print(f"  {tag:3s}: 空载 批数={qn:3d} 最大间隔={qg:6.1f}ms 停顿(>400ms)={qs:2d} | "
       f"控制面打满 批数={bn:3d} 最大间隔={bg:6.1f}ms 停顿(>400ms)={bs:2d}")
 print(f"        bed01 的 set_rule 队列: {hh}")
-# 实验有效性自检: 阻塞没跨过自然节律时, 两列相等是**实验失败**, 不能读成"多线程没用"。
-if tag == 'st' and bg < 2.0 * max(qg, 1.0):
-    print("        [实验无效] st 的 busy 未达 quiet 基线的 2x —— 阻塞太短或队列没排起来, 不要下结论")
+# 两个判据必须分开, 否则会把"实验没做够"与"假设不成立"混成同一句:
+#   队列没排起来   -> [实验无效]   , 什么结论都不能下 (负载本身没造出来);
+#   排起来了而 st 数据面未拖住 -> [假设不成立], 这是有效负结果。
+# 阈值: 单请求本身≈86ms, 往返均值>200ms 才说明有排队; 峰值并发>=K/2 才说明窗口真填满了。
+m = re.search(r'peak_inflight=(\d+).*?ctl_avg_ms=([0-9.]+)', hh)
+load_ok = bool(m) and float(m.group(2)) > 200.0 and int(m.group(1)) >= 4
+if not load_ok:
+    print("        [实验无效] 控制面没排起队列 (往返均值或峰值并发过低) —— 两个结论都不能下")
+elif tag == 'st' and bg < 2.0 * max(qg, 1.0):
+    print("        [假设不成立] 队列已排起(往返 %s ms, 峰值并发 %s)但 st 数据面未被拖住"
+          % (m.group(2), m.group(1)))
+    print("                   → 损害被单个回调时长封顶, 不随队列总长放大; 不要读成[实验失败]")
 PY
 }
 echo "--- mt (component_container_mt, 两个回调组分到不同线程) ---"; show mt
 echo "--- st (component_container, 单线程: 一个回调阻塞 = 全容器阻塞) ---"; show st
-echo "  判读口径: 帧的自然节律≈200ms(仿真器 5Hz), 所以基线不是 batch_period_ms=50 —— 阈值取 400ms。"
-echo "  预期: st 的 busy 最大间隔/停顿次数显著高于其 quiet 基线, mt 两行接近。"
-echo "  若 st≈mt, 说明本轮实验没造出足够长的阻塞 —— 是实验失败, 不要读成[多线程没用] (脚本已自动打[实验无效])。"
+echo "  判读口径: 帧的自然节律≈200ms(仿真器 5Hz), 所以基线不是 batch_period_ms=50 —— 停顿阈值取 400ms。"
+echo "  预设预期(写完再跑): st 的 busy 最大间隔/停顿次数显著高于其 quiet 基线, mt 两行接近。"
+echo "  实际结果: [假设不成立] —— 负载已足(往返 650ms)而 st 数据面不动。数字在 ADR-003, 结论是 mt 在本负载下无可测收益。"
 
 echo "=== [6] 汇总 ==="
 echo "  PASS=$PASS FAIL=$FAIL   (Q3 的状态机断言全部走这几个 PASS/FAIL, 不靠人眼看日志)"

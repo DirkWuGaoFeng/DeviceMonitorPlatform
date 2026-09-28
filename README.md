@@ -64,9 +64,9 @@ DeviceMonitorPlatform/
 │   ├── test_pipeline.cpp       # 多线程采集: 跨线程 5000 帧恶意拆包 不丢不重不乱序
 │   └── test_service_proto.cpp  # 网关命令解析/格式化 纯函数 58 断言 (含 RULES/RULE 阈值面)
 └── docs/
-    ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层
+    ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层, ADR-003 桥生命周期化与组件化
     ├── architecture.md         # 架构设计
-    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~012) + 风险分析(R-001~007)
+    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~013) + 风险分析(R-001~008)
     ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
@@ -114,6 +114,7 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 11. [x] **跨机真板接入 ROS2**（`tools/vm_realdevice_e2e.sh`）：STM32→COM4→Windows 网关→（TCP 跨机）→VM 内桥→ROS2。实测 `/dmp/frames` 33 条真帧、`/diagnostics decoded_ok=89 crc_err=0`、`selftest healthy=True ok=3034`；从 ROS 侧 `set_rule` 后**网关侧独立回读**得 `HR low=40.000 high=105.000`，倒置区间 `accepted=False`；脚本末尾自动还原现场
 12. [x] **查清 CI 那条 `exit code 1`（1）修掉一个真 bug**：本地直接跑 `qt_monitor --verify` 即复现 `db_rows=358 -> FAIL`。根因是自检拿 `SELECT COUNT(*)` **绝对值**与 N 比，而 `device_history.db` 是跨次运行的持久文件 —— **这个自检从设计上只在空库时成立**。改为增量计数后本地连跑 3 次 PASS（`+50` 恒定）
 13. [x] **查清 CI 那条 `exit code 1`（2）结论反转 → 注解锁定根因 → 已修复**：逐步核实后，失败**步骤**是 `Build qt_monitor`（CMake configure 阶段），`Link check` 与 `Headless verify` 都是 **skipped** —— 所以那个 exit 1 **与 `--verify` 无关**（上面那个是独立真 bug，只是排在挂点之后）。Actions 日志正文需登录（REST 端点返 403），于是把该腿改成“失败时用 `::error::` 把 `CMake Error` / `error:` / `undefined reference` grep 成注解”——注解在 Summary 页**匿名可读**，不需要任何人交凭据。**该设计第一次跑就兑现**：Run #4 拿到报错行 `CMake Error at CMakeLists.txt:44 (find_package)`；根因是 `install-qt-action` 的 `modules:` 只点了 `qtcharts`，而 `find_package` 还点名了 `SerialPort`（Qt 模块不随 qtbase 打包；本地是安装向导“全选”所以永远复现不了）。补上 `qtserialport` 后 **Run #5：Qt6 job 8 步全 success、Summary 页 0 errors**（详 `docs/经典Bug素材录.md` B-24/B-25）
+14. [x] **桥节点生命周期化 + 组件容器**（`LifecycleNode`、`rclcpp_components`、`launch/dmp_bridge_composed.launch.py`）：把“采集开没开”从“看话题有没有数据”变成**可查询可断言的状态机**——`tools/vm_lifecycle_compose.sh` 三层负例 **PASS=10 FAIL=0**（unconfigured 无话题无服务 / inactive 话题在但 6s 零批且 `set_rule` 被拒并回显 `state=inactive` / active 6s 30 批 / cleanup 后话题从图上消失）。**但我为架构决策设计的 A/B 实验把决策本身推翻了**：控制面饱和（201 次调用/平均往返 650ms）下同容器另一台设备帧最大间隔仅 212→250ms、停顿 0 次，`mt` 与 `st` 无可测差异 → 两个回调组从“性能必需”降级为“便宜的保险”，真实控制点改写为“任何单个回调必须短”（详 `docs/adr/ADR-003`、素材录 §7 B-26~B-34）。本轮另修掉三个真构建/验证错：`on_activate` 未链回基类导致 publisher 永不激活、OBJECT 库缺 PIC、bundle 缺前置提交造成的“旧代码编译通过”假绿
 
 ## 当前进度（本次已实现并本地验证 ✅）
 
