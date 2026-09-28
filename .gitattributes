@@ -10,6 +10,10 @@
 *.cpp  text eol=lf
 *.hpp  text eol=lf
 *.proto text eol=lf
+# rosidl 接口定义: CRLF 会让适配器把行尾字符带进字段解析, 统一 LF
+*.msg  text eol=lf
+*.srv  text eol=lf
+*.action text eol=lf
 CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 *.yml  text eol=lf
