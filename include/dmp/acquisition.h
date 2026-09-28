@@ -41,6 +41,20 @@ public:
     explicit Acquisition(size_t ringCap = 8192) : ring_(ringCap) {}
 
     void addRule(AlarmRule r) { rules_.push_back(std::move(r)); }
+
+    // ---- 阈值规则的运行期配置面 (供网关 RULES/RULE 命令与 ROS2 侧下发使用) ----
+    // 设计约束: 配置只影响"告警判定", 不触碰解码/采样链路; 同类型覆盖使下发幂等 (重复下发同一规则无副作用)。
+    const std::vector<AlarmRule>& rules() const { return rules_; }
+    void setRule(const AlarmRule& r) {                 // 同类型存在则覆盖, 否则追加
+        for (auto& e : rules_) if (e.type == r.type) { e = r; return; }
+        rules_.push_back(r);
+    }
+    bool removeRule(SampleType t) {
+        const size_t before = rules_.size();
+        for (size_t i = 0; i < rules_.size(); ++i)
+            if (rules_[i].type == t) { rules_.erase(rules_.begin() + i); return true; }
+        return before != rules_.size();
+    }
     void setSink(Sink* s) { sink_ = s; }
     void setAlarmCallback(std::function<void(const AlarmEvent&)> cb) {
         onAlarm_ = std::move(cb);

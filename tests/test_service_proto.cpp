@@ -36,11 +36,37 @@ static void test_parse() {
     CHECK(parseCommand("").kind == CmdKind::Help);                    // 空行当 help
 }
 
+static void test_rule_parse() {
+    SECTION("RULE/RULES 解析: 类型别名/浮点/带空格文案/非法入参");
+    CHECK(parseCommand("RULES").kind == CmdKind::Rules);           // 数字前缀不干扰复数形式
+    auto r = parseCommand("RULE 2 40 120 hr too fast");
+    CHECK(r.kind == CmdKind::SetRule);
+    CHECK(r.arg == TYPE_HEART_RATE);                                // 字面数字
+    CHECK(r.f1 == 40.f && r.f2 == 120.f);
+    CHECK(r.text == "hr too fast");                                 // 余下整句含空格
+    CHECK(parseCommand("rule HR 50 110").arg == TYPE_HEART_RATE);   // 名字形式 + 大小写不敏感
+    CHECK(parseCommand("RULE temperature 35 42").arg == TYPE_TEMPERATURE);
+    CHECK(parseCommand("RULE spo2 90 100").arg == TYPE_SPO2);
+    CHECK(parseCommand("RULE conc 1 2").arg == TYPE_CONCENTR);
+    CHECK(parseCommand("RULE press 1 2").arg == TYPE_PRESSURE);
+    CHECK(parseCommand("RULE hr 50 110").text.empty());             // 无文案 => 空串(服务端给默认)
+    auto neg = parseCommand("RULE hr -5 5");
+    CHECK(neg.kind == CmdKind::SetRule && neg.f1 == -5.f);          // 负阈值合法词法
+    CHECK(parseCommand("RULE BOGUS 1 2").kind == CmdKind::Unknown); // 未知类型名
+    CHECK(parseCommand("RULE BOGUS 1 2").name == "rule <bad type: BOGUS>");
+    CHECK(parseCommand("RULE hr 50").kind == CmdKind::Unknown);        // 缺 high
+    CHECK(parseCommand("RULE hr abc 60").kind == CmdKind::Unknown);    // 非数值
+    CHECK(parseCommand("RULE").kind == CmdKind::Unknown);              // 缺全部参数
+    CHECK(typeFromWord("hr") == TYPE_HEART_RATE && typeFromWord("xx") == 0);
+    CHECK(typeFromWord("6") == 0 && typeFromWord("0") == 0);           // 越界编号一律拒绝
+}
+
 static void test_format() {
     SECTION("format*: 逐字节精确输出");
     CHECK(formatStats(5, 1, 2) == "STATS ok=5 crc_err=1 dropped=2\n");
     CHECK(formatError("bad cmd") == "ERR bad cmd\n");
-    CHECK(formatHelp() == "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] help\n");
+    CHECK(formatHelp() == "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] "
+                          "rules rule[type][low][high][msg] help\n");
 
     HistAgg ha; ha.channel = 3; ha.count = 12; ha.avg = 5.5; ha.min = 1.25; ha.max = 9.75; ha.last = 4.0;
     CHECK(formatHistory(ha) == "HISTORY ch=3 count=12 avg=5.500 min=1.250 max=9.750 last=4.000\n");
@@ -50,11 +76,54 @@ static void test_format() {
 
     AlarmEvent a; a.sample = s; a.sample.recv_ts = 2000; a.message = "HR high"; a.critical = true;
     CHECK(formatAlarm(a) == "ALARM ts=2000 ch=2 type=2 name=HR value=72.500 critical=1 msg=HR high\n");
+
+    AlarmRule rr; rr.type = TYPE_HEART_RATE; rr.low = 40; rr.high = 120; rr.message = "hr too fast";
+    CHECK(formatRule(rr) == "RULE type=2 name=HR low=40.000 high=120.000 msg=hr too fast\n");
+    AlarmRule rn; rn.type = TYPE_SPO2; rn.low = 90; rn.high = 100;   // 空文案以 - 占位, 保证字段不断行
+    CHECK(formatRule(rn) == "RULE type=3 name=SPO2 low=90.000 high=100.000 msg=-\n");
+    CHECK(formatRuleAck(rr) == "RULE_ACK accepted=1 RULE type=2 name=HR low=40.000 high=120.000 msg=hr too fast\n");
+}
+
+// 配置面语义: 下发幂等 + 下发确实改变告警行为 (写下去要能看到行为差, 否则只是自娱自乐)
+static void test_rule_apply() {
+    SECTION("Acquisition 规则: 同类型覆盖幂等/删除/下发后行为改变");
+    Acquisition acq;
+    acq.addRule({TYPE_HEART_RATE, 50.f, 110.f, "HR out of range"});
+    CHECK(acq.rules().size() == 1);
+    acq.setRule({TYPE_HEART_RATE, 40.f, 120.f, "tight"});        // 覆盖而非追加
+    CHECK(acq.rules().size() == 1);
+    CHECK(acq.rules()[0].low == 40.f && acq.rules()[0].message == "tight");
+    acq.setRule({TYPE_HEART_RATE, 40.f, 120.f, "tight"});        // 重复下发无副作用
+    CHECK(acq.rules().size() == 1);
+    acq.setRule({TYPE_TEMPERATURE, 35.f, 42.f, "temp"});         // 不同类型才追加
+    CHECK(acq.rules().size() == 2);
+    CHECK(acq.removeRule(TYPE_TEMPERATURE) == true);
+    CHECK(acq.removeRule(TYPE_TEMPERATURE) == false);            // 再删不存在 => false
+    CHECK(acq.rules().size() == 1);
+
+    // 行为差: 72.5bpm 在原阈值(50..110)不告警, 收紧到 40..70 必须告警
+    int fired = 0;
+    acq.setAlarmCallback([&](const AlarmEvent&) { ++fired; });
+    struct Cap : Sink {
+        std::vector<Sample> v; void onSample(const Sample& s) override { v.push_back(s); }
+    } cap;
+    acq.setSink(&cap);
+    const auto bytes = encodeFrame([]{ Sample s; s.seq = 1; s.channel = 0; s.type = TYPE_HEART_RATE; s.value = 72.5f; return s; }());
+    acq.pushBytes(bytes.data(), bytes.size(), 1000);
+    acq.drain();
+    CHECK(fired == 0);                                           // 阈值内: 不应告警
+    acq.setRule({TYPE_HEART_RATE, 40.f, 70.f, "HR low now"});    // 下发收紧
+    acq.pushBytes(bytes.data(), bytes.size(), 1001);
+    acq.drain();
+    CHECK(fired == 1);                                           // 同一数据, 配置不通过 => 告警
+    CHECK(acq.stat().ok == 2);                                   // 解码链路未被配置操作污染
 }
 
 int main() {
     test_parse();
+    test_rule_parse();
     test_format();
+    test_rule_apply();
     std::printf("\nSERVICE_PROTO: run=%d fail=%d -> %s\n", g_run, g_fail, g_fail == 0 ? "ALL PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }

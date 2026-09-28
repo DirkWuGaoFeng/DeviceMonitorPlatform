@@ -12,6 +12,9 @@
 //   RAW                         -> 订阅原始帧字节流(上游逐字节透传, 二进制); 供下游再解码(gRPC 服务)
 //   HISTORY [ch] [windowSec]    -> 近 windowSec 秒的逐通道聚合: HISTORY ch=.. count=.. avg=.. min=.. max=.. last=..
 //                                  (ch 缺省/负数 = 全部有数据通道; 供 LLM Agent 做告警归因)
+//   RULES                       -> 逐条 RULE type=.. name=.. low=.. high=.. msg=..   (配置回读)
+//   RULE <type> <low> <high> [msg] -> RULE_ACK accepted=1 ..  幂等下发同类型覆盖
+//                                  (type 可数字 1..5 或名字 TEMP/HR/SPO2/CONC/PRESS)
 //   未知                        -> ERR unknown command: X
 // 所有应答以 '\n' 结尾, 便于客户端按行读取。
 #pragma once
@@ -27,13 +30,16 @@
 namespace dmp {
 namespace svc {
 
-enum class CmdKind { Help, Stats, Alarms, Subscribe, Raw, History, Unknown };
+enum class CmdKind { Help, Stats, Alarms, Subscribe, Raw, History, Rules, SetRule, Unknown };
 
 struct Command {
     CmdKind kind = CmdKind::Unknown;
-    int     arg  = 0;        // ALARMS [limit] / HISTORY [ch]
+    int     arg  = 0;        // ALARMS [limit] / HISTORY [ch] / RULE [type]
     int     arg2 = 0;        // HISTORY [windowSec]
+    float   f1   = 0.f;      // RULE low
+    float   f2   = 0.f;      // RULE high
     std::string name;        // 原始命令词 (小写), 未知命令回显用
+    std::string text;        // RULE 的剩余部分 = 告警文案 (可含空格)
 };
 
 inline std::string trim(const std::string& s) {
@@ -41,6 +47,20 @@ inline std::string trim(const std::string& s) {
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
     while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
     return s.substr(b, e - b);
+}
+
+// 名字 -> 类型编号 (大小写不敏感; 也接受字面数字 1..5); 非法返回 0
+// 注: 本函数必须定义在 parseCommand 之前 —— 后者对它的调用是非依赖名, 需先可见
+inline int typeFromWord(const std::string& in) {
+    std::string s = in;
+    for (char& ch : s) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (s == "TEMP" || s == "TEMPERATURE") return TYPE_TEMPERATURE;
+    if (s == "HR"   || s == "HEART_RATE")  return TYPE_HEART_RATE;
+    if (s == "SPO2")                       return TYPE_SPO2;
+    if (s == "CONC" || s == "CONCENTR")    return TYPE_CONCENTR;
+    if (s == "PRESS"|| s == "PRESSURE")    return TYPE_PRESSURE;
+    if (s.size() == 1 && s[0] >= '1' && s[0] <= '5') return s[0] - '0';
+    return 0;
 }
 
 // 解析一行命令 (大小写不敏感); 去掉行尾 \r\n
@@ -59,6 +79,18 @@ inline Command parseCommand(const std::string& line) {
     else if (word == "history")   { c.kind = CmdKind::History; c.arg = -1; c.arg2 = 60;
                                     ss >> c.arg; if (c.arg < -1) c.arg = -1;
                                     ss >> c.arg2; if (c.arg2 <= 0) c.arg2 = 60; }
+    else if (word == "rules")     c.kind = CmdKind::Rules;
+    else if (word == "rule") {
+        c.kind = CmdKind::SetRule;
+        std::string tv;
+        if (!(ss >> tv)) { c.kind = CmdKind::Unknown; c.name = word + " <missing type>"; return c; }
+        int t = typeFromWord(tv);
+        if (t <= 0) { c.kind = CmdKind::Unknown; c.name = word + " <bad type: " + tv + ">"; return c; }
+        c.arg = t;
+        if (!(ss >> c.f1) || !(ss >> c.f2)) { c.kind = CmdKind::Unknown; c.name = word + " <need low high>"; return c; }
+        std::getline(ss, c.text);            // 余下全定为告警文案
+        c.text = trim(c.text);
+    }
     else c.kind = CmdKind::Unknown;
     return c;
 }
@@ -101,7 +133,24 @@ inline std::string formatAlarm(const AlarmEvent& a) {
 }
 
 inline std::string formatError(const std::string& msg) { return "ERR " + msg + "\n"; }
-inline std::string formatHelp() { return "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] help\n"; }
+inline std::string formatHelp() {
+    return "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] rules rule[type][low][high][msg] help\n";
+}
+
+// 配置回读行: 与 AlarmRule 逐字段对应, 便于下游无歧义解析
+inline std::string formatRule(const AlarmRule& r) {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "RULE type=%u name=%s low=%.3f high=%.3f msg=%s\n",
+                  static_cast<unsigned>(r.type), typeName(r.type).c_str(),
+                  static_cast<double>(r.low), static_cast<double>(r.high),
+                  r.message.empty() ? "-" : r.message.c_str());
+    return buf;
+}
+
+// 下发回执: 回显生效后的实际边界 (而非客户端声称的值), 避免精度/截断造成双向不一致
+inline std::string formatRuleAck(const AlarmRule& applied) {
+    return "RULE_ACK accepted=1 " + formatRule(applied);
+}
 
 // HISTORY 聚合行 (由调用方汇总窗口内样本后生成; 一行一通道)
 struct HistAgg {

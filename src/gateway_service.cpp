@@ -16,6 +16,7 @@
 #include "dmp/service_proto.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -278,6 +279,35 @@ int main(int argc, char** argv) {
                             }
                         if (out.empty()) out = "HISTORY empty\n";
                         sendAll(it->sock, out);
+                        break;
+                    }
+                    case K::Rules: {   // 配置回读 (下游下发前应先读, 下发后回读核对)
+                        std::string out;
+                        for (const auto& r : acq.rules()) out += dmp::svc::formatRule(r);
+                        if (out.empty()) out = "RULE none\n";
+                        sendAll(it->sock, out);
+                        break;
+                    }
+                    case K::SetRule: { // 幂等下发: 仅改告警判定阈值, 不碰解码/采样链路
+                        if (!std::isfinite(cmd.f1) || !std::isfinite(cmd.f2) || cmd.f1 >= cmd.f2) {
+                            char b[128];
+                            std::snprintf(b, sizeof(b),
+                                          "invalid range: need low<high (got low=%g high=%g)",
+                                          static_cast<double>(cmd.f1), static_cast<double>(cmd.f2));
+                            sendAll(it->sock, dmp::svc::formatError(b));
+                            std::printf("[gateway] RULE rejected: %s\n", b);
+                            break;
+                        }
+                        dmp::AlarmRule r;
+                        r.type    = static_cast<dmp::SampleType>(cmd.arg);
+                        r.low     = cmd.f1;
+                        r.high    = cmd.f2;
+                        r.message = cmd.text.empty() ? dmp::svc::typeName(r.type) + " out of range" : cmd.text;
+                        acq.setRule(r);                       // 同类型覆盖 => 重复下发无副作用
+                        sendAll(it->sock, dmp::svc::formatRuleAck(r));
+                        std::printf("[gateway] RULE applied: type=%d low=%g high=%g msg=%s (rules=%zu)\n",
+                                    cmd.arg, static_cast<double>(r.low), static_cast<double>(r.high),
+                                    r.message.c_str(), acq.rules().size());
                         break;
                     }
                     case K::Unknown: default:
