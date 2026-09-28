@@ -13,7 +13,8 @@
 ```
 DeviceMonitorPlatform/
 ├── CMakeLists.txt              # 顶层构建 (核心/测试/可选 Qt; 已启用 C 语言以编译固件纯 C 内核)
-├── .github/workflows/ci.yml    # 质量门禁: Linux(gcc/clang)+Windows(MSYS2 MinGW) 自动 ctest 137 断言
+├── .github/workflows/ci.yml    # 质量门禁: Linux(gcc/clang)+Windows(MSYS2 MinGW) 自动 ctest 171 断言
+│                               #   (ROS2 桥的 62 项断言需 Humble 环境, 走 tools/vm_ros2_build.sh, 暂不在 CI 腿内)
 ├── include/dmp/
 │   ├── frame_protocol.h        # 设备帧协议 (帧头/seq/channel/type/value/CRC16 + 粘包拆包)
 │   ├── ring_buffer.h           # 无锁 SPSC 环形缓冲 (UI 与采集解耦)
@@ -33,6 +34,10 @@ DeviceMonitorPlatform/
 │   ├── grpc_server.cpp         # Telemetry gRPC server (合成数据源自洽 / 可连上游); GetStats/GetAlarms/Subscribe
 │   ├── grpc_client_probe.cpp   # gRPC 客户端探针 (验证三个 rpc)
 │   └── CMakeLists.txt          # protoc+grpc_cpp_plugin 代码生成 + 链接 gRPC::grpc++
+├── ros2/                       # ROS2 Humble 侧 (colcon 包, 与核心同一仓库同一帧协议)
+│   ├── README.md               # 桥的接口契约/实测记录/QoS 事故复盘
+│   ├── dmp_msgs/               # rosidl 接口: DeviceFrame(Array)/Rule(List) + Selftest/SetRule/GetRules
+│   └── dmp_ros2_bridge/        # 网关侧客户端(POSIX, 无 ROS 依赖) + 桥节点 + 纯函数层断言
 ├── wsl_setup.sh                # WSL2 一键: apt 装 gRPC 依赖 + 构建 + 合成模式冒烟自检
 ├── run_demo.ps1                # Windows 一键: 起模拟器→(可选)网关→Qt 自动连 TCP
 ├── stop_demo.ps1               # 回收上面拉起的后台进程 (支持 -WhatIf 预览)
@@ -42,6 +47,10 @@ DeviceMonitorPlatform/
 ├── run_qt_serial.ps1           # 真机: 一键起 Qt GUI 并启动即连串口(--demo-serial COM4)
 ├── run_gateway_serial.ps1      # 真机: 起串口遥测网关(COM4→TCP :9100, 文本行 API + RAW 透传)
 ├── tools/dmp_agent.py          # 运维诊断 Agent: 把网关命令封装为工具, 离线确定性归因 + LLM function-calling 双模式
+├── tools/vm_native_build.sh    # Linux 侧从 git bundle 同步 + 原生构建 + ctest
+├── tools/vm_ros2_build.sh      # colcon 构建 dmp_msgs/dmp_ros2_bridge + colcon test
+├── tools/vm_e2e.sh             # 全链路冒烟: simulator→网关→桥→ROS2 话题/服务
+├── tools/vm_qos_mismatch.sh    # QoS 错配四格矩阵取证 (实测推翻了我最初的假设)
 ├── e2e_realdevice.sh           # WSL: 真机全链路验收(网关→dmp_grpc_server→probe, 含证据输出)
 ├── firmware/                   # 下位机侧 (STM32F103 HAL), 与上位机共用帧内核
 │   ├── dmp_frame_core.{h,c}    # 纯 C 帧编码内核 (无 HAL 依赖, PC/MCU 同源校验)
@@ -52,8 +61,9 @@ DeviceMonitorPlatform/
 │   ├── test_storage.cpp        # 存储/回放 断言 (含 帧→CSV→回放 集成)
 │   ├── test_frame_parity.cpp   # 固件 C 内核 vs 上位机 C++ 逐字节一致性
 │   ├── test_pipeline.cpp       # 多线程采集: 跨线程 5000 帧恶意拆包 不丢不重不乱序
-│   └── test_service_proto.cpp  # 网关命令解析/格式化 纯函数 25 断言
+│   └── test_service_proto.cpp  # 网关命令解析/格式化 纯函数 58 断言 (含 RULES/RULE 阈值面)
 └── docs/
+    ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层
     ├── architecture.md         # 架构设计
     ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~011) + 风险分析(R-001~006)
     ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南
@@ -96,8 +106,9 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 5. [x] 危急值阈值告警（控制台横幅 + Qt 告警条 + **声音 `QApplication::beep` + 人工确认按钮**，演练 IEC 62304 C 类）
 6. [x] 把采集/告警后端抽象成服务（两种同语义实现：Windows 侧 `gateway_service.cpp` TCP 文本网关；**WSL2 侧 `service/grpc_server.cpp` 真 gRPC**（实现 `proto/telemetry.proto` 的 GetStats/GetAlarms/Subscribe）；共用同一 `Acquisition` 内核，业务层不动只换传输层）。**已串成真机全链路**：STM32→串口网关(RAW 透传)→WSL gRPC→probe，实测 `ok=34 crc_err=0` + 10 条真机样本流式到达（`e2e_realdevice.sh`）
 7. [x] 挂 LLM 运维 Agent：“3 号通道为何频繁告警？”（`tools/dmp_agent.py`，纯 stdlib）：网关新增 `HISTORY [ch] [秒]` 逐通道窗口聚合命令供归因；Agent 把 STATS/ALARMS/HISTORY/SUBSCRIBE 封装为**工具**，双模式：离线确定性诊断（无密钥、CI 可跑）+ OpenAI 兼容 function-calling 循环（`--llm`，环境变量指端点）。真机实跑：正确归因“基线均值 74.8 正常、峰值冲 129.6 = 周期性越限尖峰(固件演示注入)，非链路故障”（详见 `docs/运维Agent-诊断指南.md`）
-8. [x] 按 `docs/IEC62304-软件生命周期与风险管理.md` 补齐可追溯矩阵与风险分析：安全分级定档（Agent 归 A 类、告警链路 C 类）；风险表 6 项（R-001~006）补全严重度/概率/风险评价/控制措施→验证闭环 + 剩余风险/收益-风险/PMCF 评价；可追溯矩阵扩至 **SR-001~011**（新增 SR-010 真机→gRPC 全链路、SR-011 运维 Agent；SR-005 改真机已实机验收、SR-008 断言 15→25），**137 项断言全绿**且需求↔测试双向闭环
+8. [x] 按 `docs/IEC62304-软件生命周期与风险管理.md` 补齐可追溯矩阵与风险分析：安全分级定档（Agent 归 A 类、告警链路 C 类）；风险表 6 项（R-001~006）补全严重度/概率/风险评价/控制措施→验证闭环 + 剩余风险/收益-风险/PMCF 评价；可追溯矩阵扩至 **SR-001~011**（新增 SR-010 真机→gRPC 全链路、SR-011 运维 Agent；SR-005 改真机已实机验收、SR-008 断言 15→25），**171 项核心断言全绿**且需求↔测试双向闭环
 9. [x] 挂 **CI 质量门禁**（`.github/workflows/ci.yml`）：Linux gcc Release/Debug 作红绿灯门禁（已本地同构实测），clang 为咨询腿（`continue-on-error`），Windows 走 MSYS2 MinGW；**上 CI 过程中顺手修掉 3 个真可移植性 bug**（详 `docs/IEC62304...md` §6 回归策略）
+10. [x] **接入 ROS2 Humble**（`ros2/`）：`dmp_msgs` 定契约，`dmp_ros2_bridge` 把网关的帧流与阈值面接成 `/dmp/frames`（协议保真）+ `/diagnostics`（标准 `diagnostic_msgs` 视图）+ `/dmp/rules`（锁存）+ 三个服务；VM 内实跑端到端（`ok=396 crc_err=0`，`set_rule` 写入后**从网关侧独立回读核对**，非法区间被拒）。产出 `docs/adr/ADR-001/002` + `ros2/README.md` 的 **QoS 实测矩阵**（推翻了设计时“pub reliable + sub best_effort 会静默”的错误假设，真正错的方向是 pub best_effort + sub reliable）；过程中修掉一个最贵的跨平台 bug：`device_simulator` 的 `select(0,...)` 在 POSIX 下等于不检查任何描述符，accept 永不发生（症状：“连接正常、零字节”）
 
 ## 当前进度（本次已实现并本地验证 ✅）
 
@@ -113,7 +124,7 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - ✅ **协议一致性（关键正确性）**：`tests/test_frame_parity.cpp` **41 断言全绿**——固件 C 内核与上位机 C++ `encodeFrame/FrameDecoder` **逐字节相等** + 交叉解帧 + 金标准帧（CRC/浮点小端/seq 小端）
 - ✅ **Qt6 上位机做实**：`src/qt_monitor.cpp` 升级为 滚动曲线 + 危急值横幅 + 状态计数 + SQLite 批量落库 + **TCP/串口双数据源**可选；用 **Qt 自带 cmake+Ninja+MinGW13.1** 对真实 Qt6（Core/Gui/Widgets/Charts/Sql/Network/SerialPort）**编译+链接通过**（`build=0`）。内置 `--verify`（同步自检）/`--selftest <ms>`/`--demo-tcp` 钩子供无头/桌面复验
 - ✅ **多线程采集链路**：`include/dmp/pipeline.h` `ProducerThread<Source>` 把阻塞读源（串口 `ReadFile`/socket `recv`）放独立线程，主线程周期 `drain` 渲染；统计量以原子快照发布严守 SPSC 所有权。`monitor_serial`/`monitor_console` 均接入并编译通过；`tests/test_pipeline.cpp` **9 断言全绿**（N=5000 帧、每块 7 字节恶意拆包，不丢不重不乱序）
-- ✅ **服务层（后端抽象）**：`include/dmp/service_proto.h` 文本行协议纯函数（`parseCommand`/`format*`）+ `tests/test_service_proto.cpp` **25 断言全绿**（含 RAW/HISTORY 命令）；`src/gateway_service.cpp` `select` 单线程 TCP 网关（二进制帧→HELP/STATS/ALARMS/SUBSCRIBE/RAW/HISTORY 文本 API，多客户端订阅扇出 + 串口上游 + RAW 逐字节透传），**端到端实跑**；`proto/telemetry.proto` 同语义 gRPC 契约已在 WSL2 编成真服务并串成真机全链路
+- ✅ **服务层（后端抽象）**：`include/dmp/service_proto.h` 文本行协议纯函数（`parseCommand`/`format*`）+ `tests/test_service_proto.cpp` **58 断言全绿**（RAW/HISTORY 命令 + RULES/RULE 阈值下发面）；`src/gateway_service.cpp` `select` 单线程 TCP 网关（二进制帧→HELP/STATS/ALARMS/SUBSCRIBE/RAW/HISTORY/RULES/RULE 文本 API，多客户端订阅扇出 + 串口上游 + RAW 逐字节透传），**端到端实跑**；`proto/telemetry.proto` 同语义 gRPC 契约已在 WSL2 编成真服务并串成真机全链路
 - ✅ **Qt UI 增强（IEC C 类演练）**：新增 **历史回放页**（`SqliteSink::loadSeries` 读库 + `QSlider` 时间轴滑动窗 + 独立 `histChart_`）与 **告警声光+人工确认**（`QApplication::beep` + `确认告警` 按钮 + 未确认计数）；`qt_monitor.exe` 用 Qt 工具链**重新编译+链接通过**（exit=0）
 
 > ⚠️ 运行时冒烟：本代理会话为**非交互沙箱**，跑 GUI 子系统 Qt 程序会在按需加载 platform/QSQLITE 插件时触发 `STATUS_DLL_INIT_FAILED (0xC0000142)`，属环境限制而非代码缺陷。请在**用户桌面（交互会话）**执行 `build_qt\qt_monitor.exe --verify`（应打印 `... -> PASS`）或双击运行看实时曲线。
@@ -136,3 +147,6 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - 无锁环形缓冲 + 采集/UI 线程分离 → 高并发数据链路不丢包
 - 阈值判定与危急值告警 → 安全关键（对应医疗器械软件分级）
 - 全流程按 IEC 62304 V 模型 + ISO 14971 风险管理组织 → 法规护城河
+- ROS2 桥的双层接口（保真 topic + 标准诊断视图）与写路径安全边界 → “能写什么”比“能写多方便”先想清楚
+- QoS 不匹配是 ROS2 里唯一“发现得到、不报错、就是没数据”的故障类 → 用四格实测矩阵拿结论，而不是背文档
+- `select()` nfds 语义差异导致“连接正常、零字节” → 跨平台移植时现象离根因有多远

@@ -46,8 +46,9 @@ void DmpBridgeNode::declareParameters() {
     link_ms_      = this->declare_parameter<int>("link_check_ms", 1000);
     warn_margin_  = this->declare_parameter<double>("warn_margin", 0.05);
     max_pending_  = static_cast<size_t>(this->declare_parameter<int>("max_pending", 4096));
-    // 帧流 QoS 可配: 默认 sensor(best_effort)。之所以留成参数, 是为了能"按配置复现"
-    // 发布/订阅 QoS 不匹配导致的静默无数据 —— 见 ros2/README.md 的 QoS 事故复盘。
+    // 帧流 QoS 可配: 默认 sensor(best_effort)。留成参数不是为了演示好看, 而是因为
+    // QoS 错配是 ROS2 里唯一"发现得到、不报错、就是没数据"的故障类 —— 必须能被复现才能被写进复盘。
+    // 实测方向见 ros2/README.md: 发布 best_effort + 订阅 reliable 才会静默失效。
     const std::string qosMode = this->declare_parameter<std::string>("frame_qos", "sensor");
 
     gw_.setEndpoint(gw_host_, gw_port_);
@@ -61,7 +62,10 @@ rclcpp::QoS DmpBridgeNode::makeFrameQos(const std::string& mode) const {
     if (mode == "sensor") {
         qos.best_effort();                    // 高频遥测: 宁可丢旧样也不堆积、不阻塞
     } else if (mode == "reliable") {
-        qos.reliable();                       // 与 sensor 订阅端错配时会"连得上但收不到", 正是演示点
+        // 注意方向: 发布 RELIABLE + 订阅 best_effort 是兼容的 (实测能收到, 只是不重传)。
+        // 真正"静默无数据"的是反方向 —— 发布 best_effort 而订阅端要求 reliable。
+        // 四种组合的实测矩阵见 tools/vm_qos_mismatch.sh 与 ros2/README.md。
+        qos.reliable();
     } else if (mode == "reliable_deep") {
         qos = rclcpp::QoS(rclcpp::KeepLast(200));   // 深队列: 允许短时下游停顿而不丢帧
         qos.reliable();

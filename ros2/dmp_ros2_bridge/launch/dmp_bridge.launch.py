@@ -20,7 +20,9 @@ def generate_launch_description():
         DeclareLaunchArgument('gateway_host', default_value='127.0.0.1'),
         DeclareLaunchArgument('gateway_port', default_value='9100'),
         DeclareLaunchArgument('topic_prefix', default_value='/dmp'),
-        # frame_qos: sensor=best_effort(高频遥测默认), reliable=可与 sensor 订阅端错配, 用于复现"连得上收不到"
+        # frame_qos: sensor=best_effort(高频遥测默认) | reliable | reliable_deep。
+        # 静默无数据的错配方向是 “发布 best_effort + 订阅 reliable” (实测), 不是反过来;
+        # 取证脚本: tools/vm_qos_mismatch.sh
         DeclareLaunchArgument('frame_qos', default_value='sensor'),
         DeclareLaunchArgument('batch_period_ms', default_value='50'),
         DeclareLaunchArgument('diag_period_ms', default_value='1000'),
