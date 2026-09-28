@@ -10,6 +10,12 @@
 
 namespace dmpbr {
 
+// 为什么这里必须显式给一个别名 (真编译错: "'CallbackReturn' does not name a type"):
+// 头文件里写在类作用域内, 裸名 CallbackReturn 可以沿基类 LifecycleNodeInterface 查到;
+// 但 .cpp 里的**类外定义**中, 返回类型出现在 DmpBridgeNode:: 之前, 那时编译器还在
+// 名字空间作用域查 —— 基类里的嵌套类型看不见。上游示例也都这么写一行 using。
+using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+
 namespace {
 uint64_t nowMs() {
     using namespace std::chrono;
@@ -141,11 +147,14 @@ rclcpp::QoS DmpBridgeNode::makeFrameQos(const std::string& mode) const {
     return qos;
 }
 
-bool DmpBridgeNode::isActive() const {
+// 两个都得是**非 const**: Humble 的 LifecycleNode::get_current_state() 本身不是 const 成员
+// (后来版本才改 const), 所以"只读一个状态"在这里也得跟基类一起不带 const。
+// 靠记忆写会编译不过 —— 这是本轮在 VM 上实编得到的事实。
+bool DmpBridgeNode::isActive() {
     return get_current_state().label() == "active";
 }
 
-std::string DmpBridgeNode::stateLabel() const {
+std::string DmpBridgeNode::stateLabel() {
     return get_current_state().label();
 }
 

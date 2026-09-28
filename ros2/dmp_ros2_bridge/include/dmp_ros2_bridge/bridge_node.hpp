@@ -71,8 +71,10 @@ private:
     // ---- 参数与拓扑 ----
     void declareParameters();
     rclcpp::QoS makeFrameQos(const std::string& mode) const;
-    bool isActive() const;                    // 服务回调的守卫 (见 onSetRule)
-    std::string stateLabel() const;           // "active"/"inactive"/"unconfigured" -> 写进应答里
+    // 两个都是非 const: Humble 的 LifecycleNode::get_current_state() 不是 const 成员,
+    // 写成 const 会得 "discards qualifiers" —— 与实现文件保持一致。
+    bool isActive();                    // 服务回调的守卫 (见 onSetRule)
+    std::string stateLabel();           // "active"/"inactive"/"unconfigured" -> 写进应答里
 
     // ---- 数据面回调 (网关读线程) ----
     void onBytes(const uint8_t* buf, size_t len);
