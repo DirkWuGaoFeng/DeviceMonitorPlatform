@@ -1,4 +1,4 @@
-// dmp_ros2_bridge/bridge_node.cpp — 桥节点实现
+// dmp_ros2_bridge/bridge_node.cpp — 桥节点实现 (生命周期管理型)
 #include "dmp_ros2_bridge/bridge_node.hpp"
 
 #include "dmp/frame_protocol.h"
@@ -52,9 +52,75 @@ void DmpBridgeNode::declareParameters() {
     const std::string qosMode = this->declare_parameter<std::string>("frame_qos", "sensor");
 
     gw_.setEndpoint(gw_host_, gw_port_);
-    RCLCPP_INFO(this->get_logger(), "bridge '%s' -> gateway %s:%u (prefix=%s, frame_qos=%s)",
-                device_id_.c_str(), gw_host_.c_str(), gw_port_, topic_prefix_.c_str(), qosMode.c_str());
     qosParam_ = qosMode;
+}
+
+// 配置校验: 这里只拒"配置本身不合法", 不拒"对端还没起来"。
+// 后者交给 tickLink 重试 —— 如果把时序问题返回成 FAILURE, 整个 launch 会因网关晚启动而失败,
+// 于是运维看到的是"配置错误", 而真实原因是"谁先谁后"。这类伪装出来的因果关系最难查。
+CallbackReturn DmpBridgeNode::on_configure(const rclcpp_lifecycle::State& /*prev*/) {
+    declareParameters();
+
+    if (batch_ms_ <= 0 || diag_ms_ <= 0 || rules_ms_ <= 0 || link_ms_ <= 0) {
+        RCLCPP_ERROR(this->get_logger(), "configure 拒绝: 周期必须为正 (batch=%d diag=%d rules=%d link=%d)",
+                     batch_ms_, diag_ms_, rules_ms_, link_ms_);
+        return CallbackReturn::FAILURE;
+    }
+    if (gw_port_ == 0) {
+        RCLCPP_ERROR(this->get_logger(), "configure 拒绝: gateway_port=0 不是合法端口");
+        return CallbackReturn::FAILURE;
+    }
+    if (qosParam_ != "sensor" && qosParam_ != "reliable" && qosParam_ != "reliable_deep") {
+        // 未知 QoS 名如果静默退化成 sensor, 订阅端就会掉进"零数据且不报错"那一类故障 —— 直接拒。
+        RCLCPP_ERROR(this->get_logger(), "configure 拒绝: frame_qos='%s' 未知 (sensor|reliable|reliable_deep)",
+                     qosParam_.c_str());
+        return CallbackReturn::FAILURE;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "bridge '%s' -> gateway %s:%u (prefix=%s, frame_qos=%s)",
+                device_id_.c_str(), gw_host_.c_str(), gw_port_, topic_prefix_.c_str(), qosParam_.c_str());
+
+    // 两个回调组: 组合容器里它们会分到不同线程, 于是控制面的阻塞 RPC 不拖累数据面。
+    grpData_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    grpCtl_  = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    pubFrames_ = this->create_publisher<DeviceFrameArray>(topic_prefix_ + "/frames",
+                                                           makeFrameQos(qosParam_));
+    pubDiag_   = this->create_publisher<DiagnosticArray>("/diagnostics",
+                    rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+    // 配置是"状态"而非"事件": 锁存 + 持久, 晚起的订阅者也应立刻看到当前阈值
+    pubRules_  = this->create_publisher<RuleList>(topic_prefix_ + "/rules",
+                    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+
+    // 服务在 configure 就创建 -> inactive 期间**仍然可被调用**, 应答里带当前状态。
+    // 刻意不在 activate 才建: 未激活时服务消失, 调用方只会停在 "waiting for service to become
+    // available..." 且没有任何错误信息 (这个坑记在素材录 B-15)。可查询的"我没在干活"
+    // 比不可查询的沉默安全得多 —— 尤其在医疗语境下。
+    const auto svcQos = rmw_qos_profile_services_default;
+    srvSelftest_ = this->create_service<dmp_msgs::srv::Selftest>(
+        topic_prefix_ + "/" + device_id_ + "/selftest",
+        std::bind(&DmpBridgeNode::onSelftest, this, std::placeholders::_1, std::placeholders::_2),
+        svcQos, grpCtl_);
+    srvSetRule_ = this->create_service<dmp_msgs::srv::SetRule>(
+        topic_prefix_ + "/" + device_id_ + "/set_rule",
+        std::bind(&DmpBridgeNode::onSetRule, this, std::placeholders::_1, std::placeholders::_2),
+        svcQos, grpCtl_);
+    srvGetRules_ = this->create_service<dmp_msgs::srv::GetRules>(
+        topic_prefix_ + "/" + device_id_ + "/get_rules",
+        std::bind(&DmpBridgeNode::onGetRules, this, std::placeholders::_1, std::placeholders::_2),
+        svcQos, grpCtl_);
+
+    // configure 阶段只做一次"能不能读到阈值"的尝试: 读到就存着 (不发!), 读不到只 WARN。
+    // 注意 LifecyclePublisher 在未激活时 publish() 会被**静默丢弃** (Humble 里连日志都要
+    // 等首次激活后才打开), 所以第一版把 publishRules() 放在这里的话, 现象就是"话题永远少一帧"。
+    if (refreshRules()) {
+        RCLCPP_INFO(this->get_logger(), "configure: 读到 %zu 条阈值 (激活后才发布)",
+                    rulesByKind_.size());
+    } else {
+        RCLCPP_WARN(this->get_logger(),
+                    "configure: 网关控制面暂不可读 RULES, 激活后由 tickRules 重试 (不算配置错误)");
+    }
+    return CallbackReturn::SUCCESS;
 }
 
 rclcpp::QoS DmpBridgeNode::makeFrameQos(const std::string& mode) const {
@@ -75,43 +141,97 @@ rclcpp::QoS DmpBridgeNode::makeFrameQos(const std::string& mode) const {
     return qos;
 }
 
+bool DmpBridgeNode::isActive() const {
+    return get_current_state().label() == "active";
+}
+
+std::string DmpBridgeNode::stateLabel() const {
+    return get_current_state().label();
+}
+
 // 节点名写字面量 "dmp_bridge" 即可: launch_ros 的 name= 会下发 __node 重映射规则,
 // rcl_init 阶段用它覆盖构造器里的名字, 因此一台设备一个实例的写法成立 (多实例不重名)。
 // 之前我写的 options.node_name() 在 Humble 的 NodeOptions 上不存在, 编译即报错 —— 记在此处防复发。
+//
+// 升级成 LifecycleNode 后构造器**只剩基类初始化**: 所有副作用都挪进生命周期回调。
+// 这条线是有意义的 —— "构造一个对象"不应该等于"开始采集病人体征"。
 DmpBridgeNode::DmpBridgeNode(const rclcpp::NodeOptions& options)
-    : rclcpp::Node("dmp_bridge", options) {
-    declareParameters();
+    : rclcpp_lifecycle::LifecycleNode("dmp_bridge", options) {}
 
-    pubFrames_ = this->create_publisher<DeviceFrameArray>(topic_prefix_ + "/frames", makeFrameQos(qosParam_));
-    pubDiag_   = this->create_publisher<DiagnosticArray>("/diagnostics",
-                    rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
-    // 配置是"状态"而非"事件": 锁存 + 持久, 晚起的订阅者也应立刻看到当前阈值
-    pubRules_  = this->create_publisher<RuleList>(topic_prefix_ + "/rules",
-                    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+DmpBridgeNode::~DmpBridgeNode() {
+    // 兜底: 容器可能在 active 状态下直接被销毁 (没走 deactivate/shutdown 转换)。
+    // 网关读线程必须在这里停掉, 否则它会拿着已经析构的 decoder_ 继续 feed —— Use-After-Free。
+    gw_.closeAll();
+}
 
-    srvSelftest_ = this->create_service<dmp_msgs::srv::Selftest>(
-        topic_prefix_ + "/" + device_id_ + "/selftest",
-        std::bind(&DmpBridgeNode::onSelftest, this, std::placeholders::_1, std::placeholders::_2));
-    srvSetRule_ = this->create_service<dmp_msgs::srv::SetRule>(
-        topic_prefix_ + "/" + device_id_ + "/set_rule",
-        std::bind(&DmpBridgeNode::onSetRule, this, std::placeholders::_1, std::placeholders::_2));
-    srvGetRules_ = this->create_service<dmp_msgs::srv::GetRules>(
-        topic_prefix_ + "/" + device_id_ + "/get_rules",
-        std::bind(&DmpBridgeNode::onGetRules, this, std::placeholders::_1, std::placeholders::_2));
-
+CallbackReturn DmpBridgeNode::on_activate(const rclcpp_lifecycle::State& /*prev*/) {
     using namespace std::chrono_literals;
-    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(link_ms_),
-        [this]() { tickLink(); }));
-    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(batch_ms_),
-        [this]() { tickFrames(); }));
-    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(diag_ms_),
-        [this]() { tickDiagnostics(); }));
-    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(rules_ms_),
-        [this]() { tickRules(); }));
+    (void)std::chrono::seconds(1);
 
-    refreshRules();          // 先拿到阈值, 首轮诊断才有判据
+    // 定时器只在 active 期存在: deactivate 清空后, 数据面/控制面自然彻底停摆,
+    // 不需要在每个 tick 里再判断"我现在激活吗"。
+    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(link_ms_),
+        [this]() { tickLink(); }, grpCtl_));
+    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(batch_ms_),
+        [this]() { tickFrames(); }, grpData_));
+    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(diag_ms_),
+        [this]() { tickDiagnostics(); }, grpData_));
+    timers_.push_back(this->create_wall_timer(std::chrono::milliseconds(rules_ms_),
+        [this]() { tickRules(); }, grpCtl_));
+
+    // 先立刻发一帧阈值 + 主动连一次数据面, 省掉一个周期的空窗 (activate 之后
+    // 第一个 tick 可能要等 rules_ms_=10s, 验收脚本会误判成"没数据")。
     publishRules();
     tickLink();
+
+    RCLCPP_INFO(this->get_logger(), "activated: 数据面与判定链路已启动 (state=%s)",
+                stateLabel().c_str());
+    return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn DmpBridgeNode::on_deactivate(const rclcpp_lifecycle::State& /*prev*/) {
+    // 顺序重要: 先停定时器 (不再有人碰 publisher), 再关网关 (join 读线程)。
+    // 反过来会留一个窗口: 读线程还在喂数, 而 publisher 已无人驱动 —— 那个窗口不致命,
+    // 但会让 pending_ 在下一次 activate 时把上一批"陈旧样本"当新数据发出去。
+    timers_.clear();
+    const uint64_t okSnap = counters_.ok;
+    gw_.closeAll();
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        pending_.clear();               // 跨激活周期不留旧数据 (见上面注释)
+        lastByChannel_.clear();
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "deactivated: 已停定时器并关闭网关连接, 丢弃未发布样本 (激活期累计解码 ok=%llu)",
+                static_cast<unsigned long long>(okSnap));
+    return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn DmpBridgeNode::on_cleanup(const rclcpp_lifecycle::State& /*prev*/) {
+    // 拓扑彻底拆掉: 回到 unconfigured 之后话题/服务都不存在, 与"没起这台设备"一致。
+    timers_.clear();
+    srvSelftest_.reset(); srvSetRule_.reset(); srvGetRules_.reset();
+    pubFrames_.reset(); pubDiag_.reset(); pubRules_.reset();
+    grpData_.reset(); grpCtl_.reset();
+    gw_.closeAll();
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        pending_.clear();
+        lastByChannel_.clear();
+        rulesByKind_.clear();
+        counters_ = StreamCounters{};
+        bridgeDropped_ = 0;
+    }
+    decoder_ = dmp::FrameDecoder{};      // 半帧缓冲属于一次配置会话, 不带进下一次
+    RCLCPP_INFO(this->get_logger(), "cleaned up");
+    return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn DmpBridgeNode::on_shutdown(const rclcpp_lifecycle::State& /*prev*/) {
+    timers_.clear();
+    gw_.closeAll();
+    RCLCPP_INFO(this->get_logger(), "shutdown: 桥已静默 (state=%s)", stateLabel().c_str());
+    return CallbackReturn::SUCCESS;
 }
 
 // ---------------- 数据面 ----------------
@@ -204,6 +324,7 @@ void DmpBridgeNode::tickDiagnostics() {
         diagnostic_msgs::msg::DiagnosticStatus st;
         st.name        = "telemetry_link";
         st.hardware_id = device_id_;
+        st.values.push_back(kv("state", stateLabel()));       // 生命周期状态本身也是诊断项
         st.values.push_back(kv("data_plane", up ? "up" : "down"));
         st.values.push_back(kv("decoded_ok", std::to_string(c.ok)));
         st.values.push_back(kv("crc_err", std::to_string(c.crcErr)));
@@ -287,6 +408,7 @@ void DmpBridgeNode::tickRules() {
 
 void DmpBridgeNode::onGetRules(const std::shared_ptr<dmp_msgs::srv::GetRules::Request>,
                                std::shared_ptr<dmp_msgs::srv::GetRules::Response> res) {
+    // 读操作不加状态守卫: "现在阈值是什么"在未激活时也应当能问到 (拿到的是缓存/空)。
     refreshRules();
     {
         std::lock_guard<std::mutex> lk(mtx_);        // 仅在拷贝期间持锁
@@ -306,9 +428,11 @@ void DmpBridgeNode::onGetRules(const std::shared_ptr<dmp_msgs::srv::GetRules::Re
 void DmpBridgeNode::onSelftest(const std::shared_ptr<dmp_msgs::srv::Selftest::Request> req,
                                std::shared_ptr<dmp_msgs::srv::Selftest::Response> res) {
     std::ostringstream detail;
+    const std::string state = stateLabel();
     const std::string stats = gw_.requestOne("STATS");
     StreamCounters gc;
     const bool statsOk = parseStatsLine(stats, &gc);
+    detail << "state=" << state << '\n';
     detail << "stats=" << trimTail(stats.empty() ? "STATS unavailable" : stats) << '\n';
 
     const std::string alarms = gw_.requestLines("ALARMS 5", "ALARM ");
@@ -322,7 +446,8 @@ void DmpBridgeNode::onSelftest(const std::shared_ptr<dmp_msgs::srv::Selftest::Re
         std::lock_guard<std::mutex> lk(mtx_);
         res->rule_count = static_cast<uint32_t>(rulesByKind_.size());
     }
-    res->healthy = gw_.dataUp() && statsOk && !gc.corrupted();
+    // 未激活时 healthy 必为 false: 自检问的是"这条链路现在活着吗", 不是"配置对不对"。
+    res->healthy = (state == "active") && gw_.dataUp() && statsOk && !gc.corrupted();
     detail << "data_plane=" << (gw_.dataUp() ? "up" : "down")
            << " probe=" << (req->probe.empty() ? "-" : req->probe);
     res->detail = detail.str();
@@ -330,7 +455,15 @@ void DmpBridgeNode::onSelftest(const std::shared_ptr<dmp_msgs::srv::Selftest::Re
 
 void DmpBridgeNode::onSetRule(const std::shared_ptr<dmp_msgs::srv::SetRule::Request> req,
                               std::shared_ptr<dmp_msgs::srv::SetRule::Response> res) {
-    // 边界: 只允许写告警判定阈值; kind 未知或区间非法一律本地拒绝, 不转发给网关。
+    // 边界 0 (生命周期): 非 active 一律拒写。未激活的桥去改临床告警阈值, 后果是"改了但没人判定",
+    // 这比直接报错危险得多 —— 所以这里必须硬拒, 而不是"先存着等激活再下发"。
+    if (!isActive()) {
+        res->accepted = false;
+        res->reason = "bridge not active (state=" + stateLabel() + ")";
+        RCLCPP_WARN(this->get_logger(), "set_rule refused: %s", res->reason.c_str());
+        return;
+    }
+    // 边界 1: 只允许写告警判定阈值; kind 未知或区间非法一律本地拒绝, 不转发给网关。
     if (!isKnownKind(req->kind)) {
         res->accepted = false;
         res->reason = "unknown kind " + std::to_string(req->kind) + " (allowed 1..5)";

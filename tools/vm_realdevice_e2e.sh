@@ -54,12 +54,23 @@ source "$HOME/RosProject/dmp/install/setup.bash"
 if ! ros2 pkg prefix dmp_ros2_bridge >/dev/null 2>&1; then
     echo "  FAIL: dmp_ros2_bridge 不在环境里 —— 先跑 tools/vm_ros2_build.sh"; exit 2
 fi
+# 陈旧清理必须在 launch **之前**: 上一轮残留的 bridge_node 会与新桥同时发 /dmp/frames,
+# 于是帧数翻倍、seq 跳变, 看上去像协议层 bug。
+# 反过来说这句绝不能放在 launch 之后 —— 本脚本自己起的桥的 cmdline 里也含
+# "bridge_node", 那时 pkill 杀的就是自己(写这一版时真先写反过一次)。
+pkill -f bridge_node 2>/dev/null; sleep 1
 ros2 launch dmp_ros2_bridge dmp_bridge.launch.py \
     device_id:="$DEV" gateway_host:="$GW_HOST" gateway_port:="$GW_PORT" \
     > "$LOG/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 sleep 10
 echo "  bridge pid=$BRIDGE_PID alive=$(kill -0 $BRIDGE_PID 2>/dev/null && echo yes || echo no)"
+# 这里断言的是"launch 里那两条事件处理器真的把状态机跑到了 active", 而不是靠话题有数据反推。
+# 注意 start_state='configuring' 的必要性: 只写 goal_state='inactive' 的话,
+# 以后每次 deactivate 也会被重新激活 —— "运维按了停止, 设备自己又开始采集"。
+echo "  state=$(timeout 20 ros2 lifecycle get /dmp_bridge_$DEV 2>&1 | tr -d '\r\n')   # 期望 active"
+grep -c 'transition_event\|Transitioning\|activat' "$LOG/bridge.log" 2>/dev/null | sed 's/^/  日志里状态机行数: /'
+ros2 node list 2>/dev/null | sed 's/^/    /'
 
 echo "=== [3/5] 采话题(计时一律用 timeout -s INT: SIGTERM 会丢块缓冲, 假造 0 条) ==="
 timeout -s INT 8 ros2 topic echo /dmp/frames > "$LOG/frames.txt" 2>&1

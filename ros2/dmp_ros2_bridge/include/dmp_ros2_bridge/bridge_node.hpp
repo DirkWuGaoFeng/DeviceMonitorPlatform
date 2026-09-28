@@ -1,4 +1,4 @@
-// dmp_ros2_bridge/bridge_node.hpp — 遥测网关 <-> ROS2 的桥节点
+// dmp_ros2_bridge/bridge_node.hpp — 遥测网关 <-> ROS2 的桥节点 (生命周期管理型)
 //
 // 职责边界 (刻意保持窄):
 //   * 上行: 网关 RAW 帧流 -> /dmp/frames (协议保真层) + /diagnostics (标准诊断视图)
@@ -7,6 +7,21 @@
 //
 // 线程模型: 网关读线程只负责解码并写入互斥保护的小缓冲; 执行器线程负责发布与服务应答。
 // 这与仓库 pipeline.h 的"生产者 push / 消费者 drain"同构, 因此可直接沿用其有界丢弃语义。
+//
+// 为什么升级成 LifecycleNode (v0.2 决策, 见 docs/adr/ADR-003):
+//   普通 Node 一进场就"要么全跑要么全不跑", 而医疗现场需要三个可分别验证的语义:
+//     configure  = 参数与拓扑就绪 + 校验配置本身 (此时不产生任何数据)
+//     activate   = 真正开始采集/发布 (数据面与判定链路都只在这里被点着)
+//     deactivate = 停止采集但不丢拓扑 (网关侧连接被关闭, 话题仍在但无新数据)
+//   于是"误激活/漏激活"变成一个可查询、可断言的状态, 而不是靠看有没有数据猜。
+//
+// 并发契约 (组合容器里两个回调组会真的并行, 所以这里必须写清):
+//   grpData_ : tickFrames / tickDiagnostics      —— 只读 mtx_ 保护的数据 + 只发 frames/diag
+//   grpCtl_  : tickLink / tickRules / 三个服务    —— 会做**阻塞**的网关同步 RPC
+//   共享状态一律经 mtx_; 网关控制面另由 GatewayClient::ctlMtx_ 串行化。
+//   decoder_ 只被网关读线程触碰; device_id_/topic_prefix_ 等在 on_configure 之后只读。
+//   分成两组的理由不是风格: 控制面一次 RULES 回读要等 ~80ms 静默期, 单线程容器里这段时间
+//   会把同容器**其他设备**的帧发布一起卡住 (头阻塞)。实测数字见 tools/vm_lifecycle_compose.sh。
 #pragma once
 
 #include "dmp/acquisition.h"
@@ -19,7 +34,9 @@
 #include <dmp_msgs/srv/selftest.hpp>
 #include <dmp_msgs/srv/set_rule.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
-#include <rclcpp/rclcpp.hpp>
+#include <rclcpp/callback_group.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
+#include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 
 #include <map>
 #include <memory>
@@ -29,18 +46,33 @@
 
 namespace dmpbr {
 
-class DmpBridgeNode : public rclcpp::Node {
+class DmpBridgeNode : public rclcpp_lifecycle::LifecycleNode {
 public:
     explicit DmpBridgeNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+    ~DmpBridgeNode() override;
+
+    // ---- 生命周期回调 (Humble: 返回类型来自 LifecycleNodeInterface 的枚举类) ----
+    // 约定: 只有"配置本身不合法"才返回 FAILURE; "对端还没准备好"是 WARN + 重试,
+    // 否则网关比桥晚起就会让整个 launch 失败 —— 那会把时序问题伪装成配置错误。
+    CallbackReturn on_configure(const rclcpp_lifecycle::State& previous_state) override;
+    CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
+    CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
+    CallbackReturn on_cleanup(const rclcpp_lifecycle::State& previous_state) override;
+    CallbackReturn on_shutdown(const rclcpp_lifecycle::State& previous_state) override;
 
 private:
     using DeviceFrameArray = dmp_msgs::msg::DeviceFrameArray;
     using RuleList         = dmp_msgs::msg::RuleList;
     using DiagnosticArray  = diagnostic_msgs::msg::DiagnosticArray;
+    using FramesPub  = rclcpp_lifecycle::LifecyclePublisher<DeviceFrameArray>::SharedPtr;
+    using DiagPub    = rclcpp_lifecycle::LifecyclePublisher<DiagnosticArray>::SharedPtr;
+    using RulesPub   = rclcpp_lifecycle::LifecyclePublisher<RuleList>::SharedPtr;
 
     // ---- 参数与拓扑 ----
     void declareParameters();
     rclcpp::QoS makeFrameQos(const std::string& mode) const;
+    bool isActive() const;                    // 服务回调的守卫 (见 onSetRule)
+    std::string stateLabel() const;           // "active"/"inactive"/"unconfigured" -> 写进应答里
 
     // ---- 数据面回调 (网关读线程) ----
     void onBytes(const uint8_t* buf, size_t len);
@@ -78,9 +110,12 @@ private:
     std::map<uint8_t, dmp::AlarmRule> rulesByKind_;
     StreamCounters     counters_;
 
-    rclcpp::Publisher<DeviceFrameArray>::SharedPtr  pubFrames_;
-    rclcpp::Publisher<DiagnosticArray>::SharedPtr   pubDiag_;
-    rclcpp::Publisher<RuleList>::SharedPtr          pubRules_;
+    // 回调组: configure 建, cleanup 毁 (激活状态只决定定时器在不在线)
+    rclcpp::CallbackGroup::SharedPtr grpData_, grpCtl_;
+
+    FramesPub  pubFrames_;
+    DiagPub    pubDiag_;
+    RulesPub   pubRules_;
     rclcpp::Service<dmp_msgs::srv::Selftest>::SharedPtr srvSelftest_;
     rclcpp::Service<dmp_msgs::srv::SetRule>::SharedPtr  srvSetRule_;
     rclcpp::Service<dmp_msgs::srv::GetRules>::SharedPtr srvGetRules_;

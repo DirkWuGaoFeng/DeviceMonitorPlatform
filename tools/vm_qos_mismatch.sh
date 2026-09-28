@@ -36,11 +36,18 @@ probe() {  # probe <outfile> <订阅可靠性> <秒>
 }
 
 start_bridge() {  # start_bridge <frame_qos>
+  # 先驱动到 active 再测 QoS —— 否则"未激活零数据"会污染结论。
+  # 这两个故障的表象完全一样(订阅列表里有、echo 就是不出东西), 所以变量必须逐个排除:
+  # 状态机先确定在 active, 剩下的零数据才能归因给可靠性策略不兼容。
   pkill -f "dmp_ros2_bridge/bridge_node" 2>/dev/null; sleep 1
-  nohup ros2 run dmp_ros2_bridge bridge_node --ros-args \
+  nohup ros2 run dmp_ros2_bridge bridge_node --ros-args -r __node:=dmp_bridge_bed01 \
     -p device_id:=bed01 -p gateway_port:=9100 -p frame_qos:="$1" > "$LOG/bridge_$1.log" 2>&1 &
-  BR=$!; sleep 8
+  BR=$!; sleep 6
   kill -0 "$BR" 2>/dev/null && echo "bridge(frame_qos=$1)=alive" || echo "bridge(frame_qos=$1)=DEAD"
+  timeout 30 ros2 lifecycle set /dmp_bridge_bed01 configure >/dev/null 2>&1
+  timeout 30 ros2 lifecycle set /dmp_bridge_bed01 activate  >/dev/null 2>&1
+  echo "  state=$(timeout 20 ros2 lifecycle get /dmp_bridge_bed01 2>&1 | tr -d '\r\n')  # 必须是 active"
+  sleep 2
   timeout -s INT 15 ros2 topic info /dmp/frames --verbose 2>&1 | grep -E 'Reliability|Durability' | head -2
 }
 
