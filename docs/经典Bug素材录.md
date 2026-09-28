@@ -110,6 +110,11 @@
 - **修复**：`modules: qtcharts qtserialport`；并把注解再推进一步——configure 失败时额外报一行
   `缺组件config: Qt6Xxx`（拿 find_package 的组件名单去 `find -name 'Qt6*Config.cmake'` 里逐个对），
   以及时把“假设”和“事实”分开：即使下次仍挂，那一行会直接指出哪个组件没落地。
+- **验证（Run #5，commit `f0e73ee`）**：Qt6 job 8 个步骤全 success —— 包括原本失败的
+  `Build qt_monitor`，以及此前从未被执行到的 `Link check` / `Headless verify`（后者是靠
+  `exit $rc` 推定 rc=0，日志正文仍不可读）。Summary 页 **0 errors**，自定义注解一条都没触发——
+  这本身就是好消息：那条注解只在失败时发言。严格说这是“该步骤从此通过”的**间接**证据，
+  但与 `CMakeLists.txt:44` 的组件清单完全对得上（7 个 COMPONENTS 里只有 SerialPort 不在 `modules:` 里）。
 - **可讲点**：① **本地装了全部依赖，就永远复现不了“白名单安装”的 CI**——依赖清单得有两个独立的声明面，
   面与面不同构就是 bug；真正稳的做法是用同一个源生成两处（组件列表 → modules 参数）。
   ② `continue-on-error` 的软失败腿必须自带**可报警的面**，否则它红了几周也没人看；

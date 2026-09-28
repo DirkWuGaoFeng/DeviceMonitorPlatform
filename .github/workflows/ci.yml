@@ -6,16 +6,16 @@ name: CI
 #   windows —— MSYS2 ucrt64 MinGW 工具链 (官方 action, 不猜 runner 预装状态)
 #   qt      —— 咨询性质 (continue-on-error): 证明 Qt6 上位机 + --verify 无头自检可编可跑,
 #              装 Qt/系统图形依赖偶发不稳, 故不参与红绿灯判定。
-#              历史: 该腿长期挂一个 exit 1。已定位到失败**步骤**是 Build qt_monitor
-#              (CMake configure/编译阶段), 而不是 --verify —— 后面两步是 skipped。
-#              日志正文需登录才能看, 所以下面把根因 grep 出来用 ::error:: 当注解报出去,
-#              注解在 Summary 页匿名可读 —— 这样不需要任何人给凭据也能查。
-#              注解已生效(Run #4)并拿到了具体报错行: `CMake Error at CMakeLists.txt:44
-#              (find_package)` —— 即卡在找 Qt6 组件, 不是编译也不是自检。
-#              当前假设: REQUIRED COMPONENTS 点名了 SerialPort, 而 modules: 只装了 qtcharts
-#              (Charts/SerialPort 都是 Qt 独立仓库的模块, 不随 qtbase 打包) —— 已按此把
-#              qtserialport 补上, 并用下一条注解把"假设"与"事实"分开: 若还挂,
-#              `缺组件config` 那行会直接指出哪个组件没落地。
+#              历史: 该腿曾长期挂一个 exit 1。定位到的失败**步骤**是 Build qt_monitor
+#              (CMake configure 阶段), 而不是 --verify —— 后面两步当时是 skipped。
+#              日志正文需登录才能看, 所以把根因 grep 出来用 ::error:: 当注解报出去,
+#              注解在 Summary 页匿名可读 —— 不需要任何人给凭据也能查。
+#              已闭环(Run #4 拿到报错行 / Run #5 全绿): `CMake Error at CMakeLists.txt:44
+#              (find_package)` —— REQUIRED COMPONENTS 点名了 SerialPort, 而 modules: 只装了
+#              qtcharts。Charts/SerialPort 都是 Qt 独立仓库的模块, 不随 qtbase 打包;
+#              本地是安装向导“全选”, 所以这个差异在 Windows 上永远复现不出来。
+#              保留 continue-on-error: aqt 下载/镜像仍偶发不稳, 但现在真回归会在
+#              Summary 上留下带原话的注解, 不再是一句干巴巴的 exit code 1。
 
 on:
   push:
