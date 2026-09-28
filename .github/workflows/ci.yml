@@ -6,8 +6,10 @@ name: CI
 #   windows —— MSYS2 ucrt64 MinGW 工具链 (官方 action, 不猜 runner 预装状态)
 #   qt      —— 咨询性质 (continue-on-error): 证明 Qt6 上位机 + --verify 无头自检可编可跑,
 #              装 Qt/系统图形依赖偶发不稳, 故不参与红绿灯判定。
-#              历史: 该腿曾长期挂一个 exit 1 —— 根因不是环境, 而是 --verify 拿 COUNT(*)
-#              绝对值与 N 比 (持久库第二次跑必挂), 已于增量计数修正; 本地连跑 3 次 PASS。
+#              历史: 该腿长期挂一个 exit 1。已定位到失败**步骤**是 Build qt_monitor
+#              (CMake configure/编译阶段), 而不是 --verify —— 后面两步是 skipped。
+#              日志正文需登录才能看, 所以下面把根因 grep 出来用 ::error:: 当注解报出去,
+#              注解在 Summary 页匿名可读 —— 这样不需要任何人给凭据也能查。
 
 on:
   push:
@@ -118,12 +120,30 @@ jobs:
 
       - name: Build qt_monitor
         run: |
-          cmake -S . -B build_qt -G Ninja -DDMP_BUILD_QT=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build build_qt --target qt_monitor -j
+          # 不用 set -e: 需要先把 rc 拿到手再决定要不要把日志吐成注解。
+          set +e
+          { cmake -S . -B build_qt -G Ninja -DDMP_BUILD_QT=ON -DCMAKE_BUILD_TYPE=Release
+            echo "CFG_RC=$?"; } > cfg.log 2>&1
+          if ! grep -q 'CFG_RC=0' cfg.log; then
+            echo "::error::configure 失败(本行匿名可读): $(grep -E -A1 'CMake Error' cfg.log | head -10 | tr '\n' '|')"
+            echo "----- cfg.log tail -----"; tail -n 40 cfg.log
+            exit 1
+          fi
+          { cmake --build build_qt --target qt_monitor -j
+            echo "BUILD_RC=$?"; } > build.log 2>&1
+          if ! grep -q 'BUILD_RC=0' build.log; then
+            echo "::error::编译/链接失败(本行匿名可读): $(grep -E 'error:|undefined reference|No such file' build.log | head -10 | tr '\n' '|')"
+            echo "----- build.log tail -----"; tail -n 60 build.log
+            exit 1
+          fi
+          cat build.log | tail -5
+          echo "configure + build OK"
 
       - name: Link check (未解析依赖先自己查, 不留给 rc=127)
         run: |
-          if ldd ./build_qt/qt_monitor | grep -i 'not found'; then
+          miss=$(ldd ./build_qt/qt_monitor | grep -i 'not found' || true)
+          if [ -n "$miss" ]; then
+            echo "::error::依赖未解析(本行匿名可读): $(echo "$miss" | tr '\n' '|')"
             echo "HINT: 上面的 not found 就是 --verify 跑不起来的根因, 不是自检逻辑失败"
             exit 1
           fi
@@ -133,7 +153,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          # 显式拿 rc: 直接跑时 annotation 只给 "exit code 1", 分不清是程序判 FAIL 还是根本没起来。
+          # 显式拿 rc + 当注解: 只写 exit 1 时, Summary 上那一行永远是一句干巴巴的 exit code 1。
           ./build_qt/qt_monitor --verify; rc=$?
-          echo "verify_rc=$rc (0=PASS; 1=四方计数不一致; 其余=进程未能启动, 查上一步 ldd 与 QT_QPA_PLATFORM)"
+          echo "verify_rc=$rc (0=PASS; 1=四方计数不一致; 其余=进程未能启动)"
+          [ "$rc" = "0" ] || echo "::error::--verify 未通过 rc=$rc (本行匿名可读)"
           exit $rc

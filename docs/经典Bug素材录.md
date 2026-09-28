@@ -34,6 +34,7 @@
 | B-21 | Ubuntu apt 版 gRPC 无 CMakeConfig，必须走 pkg-config 探测 | 依赖集成 | ★ |
 | B-22 | `repeated` 枚举在 C++ 是 `RepeatedField<int>`，构造 `vector<Enum>` 触发 static_assert | 语言绑定 | ★ |
 | B-23 | `git bundle verify` 在非仓库目录跑 → 假阴性，clone 成功才是有效证明 | 取证陷阱 | ★ |
+| B-24 | CI 那个 exit 1 我一口咬定是自检逻辑——实际失败在**构建阶段**，后两步根本 skipped | 认知偏差 | ★★★ |
 
 ---
 
@@ -198,15 +199,70 @@
 
 ---
 
-## 5. 今天这条链路的完整时间线（可作为"我如何调试"的样板回答）
+## 5. 自检与断言设计缺陷（这类最容易被当成“环境问题”）
+
+### B-02 ★ `--verify` 只有在空库时才会通过（自检脚本自己不可重跑）
+
+- **现象**：本地跑 `qt_monitor.exe --verify` 得
+  `VERIFY ok=50 crcErr=0 drained=50 db_rows=358 chart_pts=50 N=50 -> FAIL`。
+  前三项全对，只有 `db_rows` 不对。
+- **误判路径**：我立刻把它当成“CI 那条腿 exit 1 的根因”，还先把结论写进了 CI 注释——
+  后来逐步核实发现错了（见 B-24）。**两个都是真 bug，但不是同一个**。
+- **根因**：断言写的是 `rows == N`，而 `rows` 来自 `SELECT COUNT(*) FROM samples`；
+  `device_history.db` 是**跨次运行的持久文件**（旧行还在里面）。所这个自检从设计上就只在空库时成立。
+- **修复**：改成取增量，并把“开库失败”与“增量不符”分开可观察：
+  ```cpp
+  const int rowsBefore = dbSink_.isOpen() ? dbSink_.rowCount() : 0;
+  ...
+  bool pass = (st.ok == N && drained == N && rows >= 0 && newRows == N && pts == N && st.crcErr == 0);
+  // 输出变成: db_rows=408(+50) ... db=open -> PASS
+  ```
+  本地连跑 3 次全 PASS，绝对行数在涨（408/458/508）但增量恒为 +50。
+- **可讲点**：自检/回归脚本必须做到**无环境前置 + 可重跑**。拿“全局绝对量”做断言的测试，
+  第一次跑绿只说明“环境恰好干净”。同一族写法：用全局内存占用断言泄漏、用 `ls` 条数断言新增文件、
+  用表总行数断言本批写入。
+
+### B-24 ★ CI 的 `exit code 1` 不等于“自检判 FAIL”：我先猜了根因，证据扇了我一耳光
+
+- **现象**：徽章是绿的（Qt 腿 `continue-on-error`），但注解里永远挂一句
+  `Linux · Qt6 上位机 (--verify 无头自检) Process completed with exit code 1.`——就这一句，没有步骤名。
+- **我的错误做法**：本地复现 `--verify` FAIL（B-02）后，我直接把它当成 CI 的根因，还写进了 ci.yml 注释。
+  这一步我**没有拿任何 CI 侧证据**就下了结论。
+- **真实事实**（用公开页面/API 逐步拿到的 conclusion）：
+
+  | 步骤 | 结论 |
+  |---|---|
+  | install-qt-action / Install Qt6 headless deps / Tool versions | success |
+  | **Build qt_monitor** | **failure** ← 就是这里 |
+  | Link check | **skipped** |
+  | Headless verify | **skipped** |
+
+  即 exit 1 发生在 **CMake configure/编译阶段**，`--verify` 根本没被执行到。
+- **为什么拿不到日志**：Actions 日志正文**需登录**；匿名访问时折叠条能点开但内容区为空，
+  REST 日志端点返 403（`Must have admin rights to Repository`）。唯一匿名可读的面是**注解（annotations）**。
+- **对策（已写进 ci.yml）**：失败时把根因 grep 出来用 `::error::` 当注解报出去 ——
+  注解会出现在 Summary 页且**匿名可读**，不需要任何人交凭据：
+  ```bash
+  { cmake -S . -B build_qt ...; echo "CFG_RC=$?"; } > cfg.log 2>&1
+  grep -q 'CFG_RC=0' cfg.log || echo "::error::configure 失败(本行匿名可读): $(grep -E -A1 'CMake Error' cfg.log | tr '\n' '|')"
+  ```
+- **可讲点**：① 先定住“**挂在哪一步**”，再谈根因；步骤结论在公开 API 里就能拿到，不需要日志权限；
+  ② 本地能复现的 bug 不等于远端那个 bug，**同一个症状族里可能有两个独立缺陷**；
+  ③ 可观测性要设计在**自己能读的那个面上**（注解 > 步骤输出 > 日志）；
+  ④ 我把写错的注释当场改回“待下一次注解锁定”，而不是留着好看。
+
+---
+
+## 6. 这一轮链路的完整时间线（可作为"我如何调试"的样板回答）
 
 1. 端到端零字节 → 不猜，grep 全仓 `select(` → 定位 `select(0,...)`（B-01）。
 2. 修完有数据：`STATS ok=396 crc_err=0 dropped=0`、`/dmp/frames` 出真帧。
 3. QoS 实验"0 条" → 怀疑测量方法 → `timeout -s INT` 重做四格矩阵（B-03）→ 发现自己的规则记反（B-07）→
    改代码注释 + 改 launch 注释 + 写进 `ros2/README.md` 复盘。
 4. 桥首次真编译抓出 4 个错（B-11/B-12/B-04 + 一个未声明成员函数）。
-5. CI 徽章绿但注解里挂一个 `exit code 1` → 不猜环境，本地直接跑 `qt_monitor --verify` 复现
-   `db_rows=358 -> FAIL` → 根因是自检非幂等（B-02）→ 改增量计数 → 连跑 3 次 `PASS`（+50 恒定）。
+5. CI 徽章绿但注解里挂一个 `exit code 1` → 本地复现 `--verify` 的 `db_rows=358 -> FAIL` → 修成增量计数
+   → 连跑 3 次 PASS（B-02）。但我当时把这句当成了 CI 的根因并写进注释 —— 后续逐步核实发现 CI 其实挂在
+   `Build qt_monitor`，后两步 skipped（B-24）。真实原因等下一次 CI 的匿名注解锁定。
 6. 跨机真板验收：裸 TCP 先证网关在出帧 → 再起桥 → `/dmp/frames` 33~35 条真帧、
    `/diagnostics decoded_ok=89 crc_err=0`、`set_rule` 后**网关侧独立回读** `HR low=40.000 high=105.000`、
    倒置区间 `accepted=False reason='need low < high'`、`selftest healthy=True ok=3034`。
@@ -214,7 +270,7 @@
 
 ---
 
-## 6. 追加模板
+## 7. 追加模板
 
 ```markdown
 ### B-XX ★? <一句话标题>
