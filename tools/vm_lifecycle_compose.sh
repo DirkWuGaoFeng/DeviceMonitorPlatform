@@ -13,9 +13,15 @@
 # Q3 的断言为什么必须分三层, 一层都不能省:
 #   unconfigured: 话题/服务**根本不存在** (publisher 与三个服务都是 on_configure 才创建的)
 #   inactive    : 话题在、服务在、订阅得到, 但**零数据** (LifecyclePublisher::publish() 未激活时
-#                 静默丢弃, 连日志都要等首次激活后才打 —— 这是 Humble 的真实行为, 不是 bug)
+#                 直接 return; 不是完全静默 —— 每个激活周期会打**一句** WARN, 但 logger 名是
+#                 "LifecyclePublisher" 而不是节点名, 按节点名 grep 会看漏)
 #   active      : 数据与写入都恢复
 #   只测"active 能跑通"就等于没测: 那无法区分"守卫生效"和"恰好没数据"。
+#
+# 反向同样成立, 而且是本轮真踩到的: 首跑 [2]"inactive 零数据"PASS 了, 但它是**假 PASS** ——
+# 那时 on_activate 忘了链回基类, 门禁从头到尾没开过, 这一条在任何情况下都会绿。
+# 口径: **"零数据"类断言只有在同脚本能证明"该有数据时确实有"的前提下才成立**,
+# 否则它测的是你的 bug, 不是守卫。所以下面 [3] 必须与 [2] 一起看, 不能各自报功。
 set +u
 set +e
 source /opt/ros/humble/setup.bash

@@ -117,8 +117,10 @@ CallbackReturn DmpBridgeNode::on_configure(const rclcpp_lifecycle::State& /*prev
         svcQos, grpCtl_);
 
     // configure 阶段只做一次"能不能读到阈值"的尝试: 读到就存着 (不发!), 读不到只 WARN。
-    // 注意 LifecyclePublisher 在未激活时 publish() 会被**静默丢弃** (Humble 里连日志都要
-    // 等首次激活后才打开), 所以第一版把 publishRules() 放在这里的话, 现象就是"话题永远少一帧"。
+    // 为什么不在这里发: LifecyclePublisher 未激活时 publish() 直接 return, 等于发到一个
+    // 关着的门上。它不是完全无声 —— should_log_ 初值为 true, 第一次丢弃会打一条 WARN
+    // 然后置 false (见 on_activate 上方注释), 所以日志里只有一句, 且 logger 名是
+    // "LifecyclePublisher" 而不是节点名, 扫日志时极易看漏。
     if (refreshRules()) {
         RCLCPP_INFO(this->get_logger(), "configure: 读到 %zu 条阈值 (激活后才发布)",
                     rulesByKind_.size());
@@ -173,9 +175,16 @@ DmpBridgeNode::~DmpBridgeNode() {
     gw_.closeAll();
 }
 
-CallbackReturn DmpBridgeNode::on_activate(const rclcpp_lifecycle::State& /*prev*/) {
-    using namespace std::chrono_literals;
-    (void)std::chrono::seconds(1);
+CallbackReturn DmpBridgeNode::on_activate(const rclcpp_lifecycle::State& prev) {
+    // ★ 必须链回基类, 否则整个数据面永远不会通。位置在两处不一样:
+    // activate 里放在**最前** (先开门再发东西), deactivate 里放在**最后** (先停生产者再关门)。
+    // Humble 的 LifecycleNode 在基类里只**实现**了 on_activate / on_deactivate 这两个 override
+    // (其余生命周期回调留给用户), 它们的职责是遍历 add_managed_entity() 注册的托管实体
+    // (create_publisher 会把每个 LifecyclePublisher 注册进去) 并翻 is_activated 开关。
+    // 自己 override 而不链回去 => 状态机确实到了 active、话题在、服务在、定时器在跑,
+    // 但 publish() 永远被丢弃 —— 上一轮就是这个坑。
+    // 链回去而不是手写三个 pubFrames_->on_activate(): 以后多一个 publisher 就不会又忘。
+    CallbackReturn ret = LifecycleNode::on_activate(prev);   // 先开门(激活 publisher), 再发东西
 
     // 定时器只在 active 期存在: deactivate 清空后, 数据面/控制面自然彻底停摆,
     // 不需要在每个 tick 里再判断"我现在激活吗"。
@@ -190,15 +199,17 @@ CallbackReturn DmpBridgeNode::on_activate(const rclcpp_lifecycle::State& /*prev*
 
     // 先立刻发一帧阈值 + 主动连一次数据面, 省掉一个周期的空窗 (activate 之后
     // 第一个 tick 可能要等 rules_ms_=10s, 验收脚本会误判成"没数据")。
+    // 注: 这两句能真的发出去, 前提是上面已经链过基类 —— 本轮先写了这两句、后链基类,
+    // 日志里就留下一条"/dmp/rules ... not activated"的 WARN, 因为基类还没开门。
     publishRules();
     tickLink();
 
     RCLCPP_INFO(this->get_logger(), "activated: 数据面与判定链路已启动 (state=%s)",
                 stateLabel().c_str());
-    return CallbackReturn::SUCCESS;
+    return ret;
 }
 
-CallbackReturn DmpBridgeNode::on_deactivate(const rclcpp_lifecycle::State& /*prev*/) {
+CallbackReturn DmpBridgeNode::on_deactivate(const rclcpp_lifecycle::State& prev) {
     // 顺序重要: 先停定时器 (不再有人碰 publisher), 再关网关 (join 读线程)。
     // 反过来会留一个窗口: 读线程还在喂数, 而 publisher 已无人驱动 —— 那个窗口不致命,
     // 但会让 pending_ 在下一次 activate 时把上一批"陈旧样本"当新数据发出去。
@@ -210,10 +221,15 @@ CallbackReturn DmpBridgeNode::on_deactivate(const rclcpp_lifecycle::State& /*pre
         pending_.clear();               // 跨激活周期不留旧数据 (见上面注释)
         lastByChannel_.clear();
     }
+    // 基类的 on_deactivate 负责把所有托管实体关门。不链回去的话, deactivate 之后
+    // is_activated 仍为 true, "inactive 期零数据"就完全靠"定时器正好不在了"这个巧合撑着 ——
+    // 一个只靠定时器而不靠门禁的守卫, 在有人新增一条不走定时器的发布路径时就会漏。关闸放在
+    // 最后是因为: 先停生产者再关门, 反过来会刷一屏 "publisher is not activated" 的 WARN。
+    CallbackReturn ret = LifecycleNode::on_deactivate(prev);
     RCLCPP_INFO(this->get_logger(),
-                "deactivated: 已停定时器并关闭网关连接, 丢弃未发布样本 (激活期累计解码 ok=%llu)",
+                "deactivated: 已停定时器、关网关连接并关闭发布门, 丢弃未发布样本 (激活期累计解码 ok=%llu)",
                 static_cast<unsigned long long>(okSnap));
-    return CallbackReturn::SUCCESS;
+    return ret;
 }
 
 CallbackReturn DmpBridgeNode::on_cleanup(const rclcpp_lifecycle::State& /*prev*/) {
