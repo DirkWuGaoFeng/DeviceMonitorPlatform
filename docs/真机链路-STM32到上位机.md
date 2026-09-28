@@ -51,7 +51,9 @@ TEMP= 36.8 ██████  HR=  74 ███  SPO2=  97 █████  CON
 .\run_qt_serial.ps1 -Port COM3     # 换口
 ```
 等价手动步骤：直接开 `build_qt\qt_monitor.exe --demo-serial COM4`，或在界面里源下拉选 **"串口 (STM32)"** → 选 COM4 → 波特 115200 → **连接**。可看实时曲线、告警横幅+确认消声、历史回放页（SQLite 落库）。
-无头回归验证（不需桌面）：`qt_monitor.exe --verify` → `VERIFY ok=50 crcErr=0 drained=50 db_rows=50 chart_pts=50 -> PASS`（此验证顺带修掉了一个 `status_` 未创建即使用的构造期空指针崩溃）。
+无头回归验证（不需桌面）：`qt_monitor.exe --verify` → `VERIFY ok=50 crcErr=0 drained=50 db_rows=N(+50) chart_pts=50 N=50 db=open -> PASS`（此验证顺带修掉了一个 `status_` 未创建即使用的构造期空指针崩溃）。
+> 注：落库一项现在校的是**增量**。旧写法直接拿 `COUNT(*)` 与 50 比，而 `device_history.db` 是跨次运行的持久文件，
+> 于是这个自检只在空库时成立——本地复跑与 CI 都会得到一个看不出原因的 `exit 1`（见 `docs/经典Bug素材录.md` B-02）。
 
 ---
 

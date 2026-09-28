@@ -287,6 +287,9 @@ public:
     // 校各项计数一致后写 qt_demo_stat.txt, 以退出码表示 PASS(0)/FAIL(1)。
     int runVerify() {
         const int N = 50;
+        // 落库计数只能取"增量": device_history.db 是跨次运行的持久文件, rowCount() 是 COUNT(*)。
+        // 早期版本直接拿绝对值与 N 比, 于是这个自检只有在空库时才可能通过 —— 本地复跑与 CI 都必挂。
+        const int rowsBefore = dbSink_.isOpen() ? dbSink_.rowCount() : 0;
         std::vector<uint8_t> stream;
         for (int i = 0; i < N; ++i) {
             dmp::Sample s;
@@ -299,14 +302,17 @@ public:
         size_t drained = acq_.drain(1024);
         chartSink_->present(30.0);                         // 把缓冲刷到 QLineSeries
         auto st = acq_.stat();
-        int rows = dbSink_.rowCount();
+        const int rows = dbSink_.isOpen() ? dbSink_.rowCount() : -1;
+        const int newRows = rows - rowsBefore;
         int pts = 0; for (auto* s : series_) pts += s->count();
-        bool pass = (st.ok == (uint64_t)N && drained == (size_t)N && rows == N && pts == N && st.crcErr == 0);
+        bool pass = (st.ok == (uint64_t)N && drained == (size_t)N && rows >= 0 && newRows == N
+                    && pts == N && st.crcErr == 0);
         char line[220];
         std::snprintf(line, sizeof(line),
-                      "VERIFY ok=%llu crcErr=%llu drained=%llu db_rows=%d chart_pts=%d N=%d -> %s\n",
+                      "VERIFY ok=%llu crcErr=%llu drained=%llu db_rows=%d(+%d) chart_pts=%d N=%d db=%s -> %s\n",
                       (unsigned long long)st.ok, (unsigned long long)st.crcErr,
-                      (unsigned long long)drained, rows, pts, N, pass ? "PASS" : "FAIL");
+                      (unsigned long long)drained, rows, newRows, pts, N,
+                      dbSink_.isOpen() ? "open" : "MISSING", pass ? "PASS" : "FAIL");
         std::printf("%s", line); std::fflush(stdout);
         QString p = QCoreApplication::applicationDirPath() + "/qt_demo_stat.txt";
         if (FILE* f = std::fopen(p.toLocal8Bit().constData(), "w")) { std::fputs(line, f); std::fclose(f); }
