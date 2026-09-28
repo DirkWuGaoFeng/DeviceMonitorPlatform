@@ -67,7 +67,15 @@ int main(int argc, char** argv) {
         // 接受新连接(非阻塞式轮询)
         fd_set rf; FD_ZERO(&rf); FD_SET(listener, &rf);
         timeval tv{0, 0};
-        if (select(0, &rf, nullptr, nullptr, &tv) > 0) {
+        // nfds 语义差异: Windows 的 select 忽略第一个参数, POSIX 要求它是 max_fd+1。
+        // 传 0 在 Windows 上跑得好好的, 到 Linux 上就变成"一个 fd 都不检查" —— accept 永不发生,
+        // 而三次握手由内核 backlog 完成, 所以症状是"连接正常但零字节", 极难从现象倒推。
+#ifdef _WIN32
+        const int nfds = 0;
+#else
+        const int nfds = listener + 1;
+#endif
+        if (::select(nfds, &rf, nullptr, nullptr, &tv) > 0) {
             sock_t c = ::accept(listener, nullptr, nullptr);
             if (c != INVALID_SOCKET) { clients.push_back(c); std::printf("[simulator] client connected\n"); }
         }
