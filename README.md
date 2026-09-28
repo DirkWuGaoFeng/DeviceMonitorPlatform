@@ -51,6 +51,7 @@ DeviceMonitorPlatform/
 ├── tools/vm_ros2_build.sh      # colcon 构建 dmp_msgs/dmp_ros2_bridge + colcon test
 ├── tools/vm_e2e.sh             # 全链路冒烟: simulator→网关→桥→ROS2 话题/服务
 ├── tools/vm_qos_mismatch.sh    # QoS 错配四格矩阵取证 (实测推翻了我最初的假设)
+├── tools/vm_realdevice_e2e.sh  # 跨机真板验收: STM32→Windows 网关→VM 内 ROS2 话题/服务
 ├── e2e_realdevice.sh           # WSL: 真机全链路验收(网关→dmp_grpc_server→probe, 含证据输出)
 ├── firmware/                   # 下位机侧 (STM32F103 HAL), 与上位机共用帧内核
 │   ├── dmp_frame_core.{h,c}    # 纯 C 帧编码内核 (无 HAL 依赖, PC/MCU 同源校验)
@@ -65,11 +66,12 @@ DeviceMonitorPlatform/
 └── docs/
     ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层
     ├── architecture.md         # 架构设计
-    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~011) + 风险分析(R-001~006)
+    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~012) + 风险分析(R-001~007)
     ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
-    └── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
+    ├── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
+    └── 经典Bug素材录.md         # 23 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
 ```
 
 ## 构建（核心，不依赖 Qt）
@@ -109,6 +111,8 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 8. [x] 按 `docs/IEC62304-软件生命周期与风险管理.md` 补齐可追溯矩阵与风险分析：安全分级定档（Agent 归 A 类、告警链路 C 类）；风险表 6 项（R-001~006）补全严重度/概率/风险评价/控制措施→验证闭环 + 剩余风险/收益-风险/PMCF 评价；可追溯矩阵扩至 **SR-001~011**（新增 SR-010 真机→gRPC 全链路、SR-011 运维 Agent；SR-005 改真机已实机验收、SR-008 断言 15→25），**171 项核心断言全绿**且需求↔测试双向闭环
 9. [x] 挂 **CI 质量门禁**（`.github/workflows/ci.yml`）：Linux gcc Release/Debug 作红绿灯门禁（已本地同构实测），clang 为咨询腿（`continue-on-error`），Windows 走 MSYS2 MinGW；**上 CI 过程中顺手修掉 3 个真可移植性 bug**（详 `docs/IEC62304...md` §6 回归策略）
 10. [x] **接入 ROS2 Humble**（`ros2/`）：`dmp_msgs` 定契约，`dmp_ros2_bridge` 把网关的帧流与阈值面接成 `/dmp/frames`（协议保真）+ `/diagnostics`（标准 `diagnostic_msgs` 视图）+ `/dmp/rules`（锁存）+ 三个服务；VM 内实跑端到端（`ok=396 crc_err=0`，`set_rule` 写入后**从网关侧独立回读核对**，非法区间被拒）。产出 `docs/adr/ADR-001/002` + `ros2/README.md` 的 **QoS 实测矩阵**（推翻了设计时“pub reliable + sub best_effort 会静默”的错误假设，真正错的方向是 pub best_effort + sub reliable）；过程中修掉一个最贵的跨平台 bug：`device_simulator` 的 `select(0,...)` 在 POSIX 下等于不检查任何描述符，accept 永不发生（症状：“连接正常、零字节”）
+11. [x] **跨机真板接入 ROS2**（`tools/vm_realdevice_e2e.sh`）：STM32→COM4→Windows 网关→（TCP 跨机）→VM 内桥→ROS2。实测 `/dmp/frames` 33 条真帧、`/diagnostics decoded_ok=89 crc_err=0`、`selftest healthy=True ok=3034`；从 ROS 侧 `set_rule` 后**网关侧独立回读**得 `HR low=40.000 high=105.000`，倒置区间 `accepted=False`；脚本末尾自动还原现场
+12. [x] **查清 CI 长期挂着的 `exit code 1`**（Linux·Qt6 腿）：不猜环境，本地直接跑 `qt_monitor --verify` 即复现 `db_rows=358 -> FAIL`。根因是自检拿 `SELECT COUNT(*)` **绝对值**与 N 比，而 `device_history.db` 是跨次运行的持久文件 —— **这个自检从设计上只在空库时成立**。改为增量计数后本地连跑 3 次 PASS（`+50` 恒定），并给 CI 该腿加了依赖安装/`ldd` 检查/显式取 rc 三步，下次失败能直接看到是哪一步
 
 ## 当前进度（本次已实现并本地验证 ✅）
 
@@ -150,3 +154,5 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - ROS2 桥的双层接口（保真 topic + 标准诊断视图）与写路径安全边界 → “能写什么”比“能写多方便”先想清楚
 - QoS 不匹配是 ROS2 里唯一“发现得到、不报错、就是没数据”的故障类 → 用四格实测矩阵拿结论，而不是背文档
 - `select()` nfds 语义差异导致“连接正常、零字节” → 跨平台移植时现象离根因有多远
+- `--verify` 拿 `COUNT(*)` 绝对值做断言 → **自检脚本自己不可重跑**比没自检更坑（它在 CI 上长期挂着一个 exit 1，没人看得懂）
+- `timeout` 默认 SIGTERM 不 flush → 被杀进程丢块缓冲，**“0 条数据”可能是取证手段自己造的假**

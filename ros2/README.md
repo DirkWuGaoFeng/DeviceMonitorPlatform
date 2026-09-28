@@ -34,7 +34,7 @@ STM32/模拟器 ──帧协议──> gateway_service ──RAW 字节流──
 | `<prefix>/<device>/set_rule` | `dmp_msgs/SetRule` | — | 写：只改告警判定阈值，见下节安全边界 |
 | `<prefix>/<device>/get_rules` | `dmp_msgs/GetRules` | — | 回读服务端**实际生效值**，不是调用方声称值 |
 
-## 三步复现（Linux / VM）
+## 复现步骤（Linux / VM）
 
 ```bash
 # 0) Windows 侧打包完整历史（不要求目标机能访问 GitHub）
@@ -51,6 +51,9 @@ bash tools/vm_e2e.sh
 
 # 4) QoS 错配四格矩阵取证
 bash tools/vm_qos_mismatch.sh
+
+# 5) 跨机真板验收（需先在 Windows 侧起 gateway_service --serial COM4）
+bash tools/vm_realdevice_e2e.sh 192.168.109.1 9100 bed01
 ```
 
 `tools/vm_*.sh` 一律不用 `set -e`：这些脚本的价值在于**把每一步真实结果都打出来**，
@@ -65,7 +68,32 @@ bash tools/vm_qos_mismatch.sh
   `set_rule{kind:2,low:45,high:115}` → `accepted=True`，**网关侧独立回读** `RULES` 显示 HR 已是 `[45.000, 115.000]`；
   倒置区间 `{low:90,high:20}` → `accepted=False reason='need low < high'`
 
+## 跨机真板验收（2026-09-29，STM32 → Windows 网关 → VM 内 ROS2）
+
+数据流：`STM32(USART1) → COM4 → gateway_service.exe 9100 --serial COM4 → (TCP 跨机) → VM 内 dmp_bridge → ROS2`
+
+| 检查项 | 实测 |
+|---|---|
+| 网关侧（不经 ROS，先排除变量） | `frames_3s=14 seq=[12806..12819]`、`STATS ok=2874 crc_err=0 dropped=0` |
+| `/dmp/frames` | `seq_lines=33`，值为板上真实采样（心率 66.7、血氧 97.3、浓度 7.4、体温 37.0） |
+| `/diagnostics` | `decoded_ok=89`、`crc_err=0`、`telemetry_link: stream clean` |
+| 桥侧发布 QoS | `Reliability: BEST_EFFORT`（`topic info --verbose` 实测，非文档推断） |
+| 下行写阈值 | `accepted=True reason='applied'` → `get_rules` HR=`[40.0,105.0]` → **网关侧独立回读** `RULE type=2 name=HR low=40.000 high=105.000 msg=realdevice test` |
+| 非法写 | `accepted=False reason='need low < high'` |
+| 自检 | `healthy=True ok=3034 crc_err=0 dropped=0 rule_count=3 recent_alarms=5 data_plane=up` |
+
+两个当时没预判到、但值得记下来的事实：
+
+1. **防火墙无需改**。VM 能主动探测到 `192.168.109.1:9100` 可连通（先测后做，不是盲目加规则）。
+2. **服务名带设备段**：话题是 `/dmp/frames`，服务却是 `/dmp/bed01/set_rule`。
+   写成 `/dmp/set_rule` 只会得一句 `waiting for service to become available...`，**不报错、只卡超时**。
+
+验收脚本会**自己把现场还原**（末尾恢复 HR 默认区间）——而“还原”必须在 kill 桥之前，
+因为服务提供方就是桥自己。
+
 ## QoS 事故复盘：我原来的假设是反的
+
+> 本文件只记结论；每条 bug 的“我当时误判成什么”统一收到 `docs/经典Bug素材录.md`。
 
 设计时我认定「发布 reliable + 订阅 sensor(best_effort) 会连得上收不到」，并把 `frame_qos` 留成参数以便复现。
 实测四格矩阵（`tools/vm_qos_mismatch.sh`，每格 8 秒窗口，统计帧行数）：
