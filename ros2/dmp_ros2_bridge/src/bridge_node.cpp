@@ -63,17 +63,19 @@ rclcpp::QoS DmpBridgeNode::makeFrameQos(const std::string& mode) const {
     } else if (mode == "reliable") {
         qos.reliable();                       // 与 sensor 订阅端错配时会"连得上但收不到", 正是演示点
     } else if (mode == "reliable_deep") {
+        qos = rclcpp::QoS(rclcpp::KeepLast(200));   // 深队列: 允许短时下游停顿而不丢帧
         qos.reliable();
-        qos.get_rmw_qos_profile().depth = 100;
+        // 注: 不要写 qos.get_rmw_qos_profile().depth = N —— 它返回的是副本, 改完即丢, 是静默失效的写法。
+        // 队列深度只能通过 KeepLast(n) 设定。
     }
     return qos;
 }
 
-// 节点名优先取 NodeOptions (launch 里可按设备起多个实例), 未指定时回退 dmp_bridge。
-// 如果不读 options.node_name() 而硬编码名字, launch 传的 name= 会被静默忽略 —— 多实例同构时这是个隐蔽坑。
+// 节点名写字面量 "dmp_bridge" 即可: launch_ros 的 name= 会下发 __node 重映射规则,
+// rcl_init 阶段用它覆盖构造器里的名字, 因此一台设备一个实例的写法成立 (多实例不重名)。
+// 之前我写的 options.node_name() 在 Humble 的 NodeOptions 上不存在, 编译即报错 —— 记在此处防复发。
 DmpBridgeNode::DmpBridgeNode(const rclcpp::NodeOptions& options)
-    : rclcpp::Node(options.node_name().empty() ? std::string("dmp_bridge") : options.node_name(),
-                   options) {
+    : rclcpp::Node("dmp_bridge", options) {
     declareParameters();
 
     pubFrames_ = this->create_publisher<DeviceFrameArray>(topic_prefix_ + "/frames", makeFrameQos(qosParam_));
@@ -188,7 +190,7 @@ void DmpBridgeNode::tickDiagnostics() {
     DiagnosticArray arr;
     arr.header.stamp = this->get_clock()->now();
     auto kv = [](const std::string& k, const std::string& v) {
-        diagnostic_msgs::msg::KeyValuePair p;
+        diagnostic_msgs::msg::KeyValue p;   // 类型名是 KeyValue, 不是 KeyValuePair
         p.key = k; p.value = v;
         return p;
     };

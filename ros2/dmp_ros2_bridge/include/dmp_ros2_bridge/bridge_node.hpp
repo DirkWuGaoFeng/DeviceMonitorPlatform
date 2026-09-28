@@ -59,6 +59,7 @@ private:
     void onGetRules(const std::shared_ptr<dmp_msgs::srv::GetRules::Request> req,
                     std::shared_ptr<dmp_msgs::srv::GetRules::Response> res);
     bool refreshRules();      // 控制面 RULES 回读 -> rulesByKind_
+    void publishRules();      // rulesByKind_ -> 锁存话题 (自行加锁, 调用者不得持 mtx_)
 
     // ---- 成员 ----
     GatewayClient      gw_;
