@@ -36,6 +36,15 @@
 | B-23 | `git bundle verify` 在非仓库目录跑 → 假阴性，clone 成功才是有效证明 | 取证陷阱 | ★ |
 | B-24 | CI 那个 exit 1 我一口咬定是自检逻辑——实际失败在**构建阶段**，后两步根本 skipped | 认知偏差 | ★★★ |
 | B-25 | CI 装 Qt 的 `modules:` 漏了一个，而本地全量安装永远复现不了 | 构建/环境差异 | ★★★ |
+| B-26 | `on_activate` 忘了链回基类：状态到 active、话题在、定时器在跑，publish 全被丢 | 框架机制 | ★★★ |
+| B-27 | "inactive 零数据"那条 PASS 是假的——门禁从未开过，它永远为真 | 断言设计 | ★★★ |
+| B-28 | 我为架构决策设计的 A/B 实验把决策本身推翻了（阻塞低于自然节律） | 实验设计/认知偏差 | ★★★ |
+| B-29 | OBJECT 库默认不编 PIC：两个 exe 全绿，只有组件 `.so` 链接报 relocation | 构建系统 | ★★ |
+| B-30 | bundle 缺前置提交 → `git fetch` 失败但脚本继续 → 交出"旧代码编译通过"的假绿 | 取证陷阱 | ★★★ |
+| B-31 | 取证脚本的 `timeout` 外层时限 = 内层排空期限，最后一行 print 被杀，数字全丢 | 方法论 | ★★ |
+| B-32 | API 探针全绿仍编不过：`CallbackReturn` 类外可见性 + `get_current_state()` 非 const | API 凭印象 | ★★ |
+| B-33 | 我把"未激活静默丢弃、连 warn 都没有"写进文档——源码说它会 WARN 一次 | 文档即事实 | ★★ |
+| B-34 | 编辑工具的模糊匹配会把错别字写进文件（疪形、跳周期这类） | 工具链 | ★ |
 
 ---
 
@@ -303,7 +312,147 @@
 
 ---
 
-## 7. 追加模板
+## 7. c8 一轮：ROS2 生命周期化与组件化（B-26~B-34）
+
+> 本轮主题就一句话：**一个架构决策（LifecycleNode + 组件容器）从落码到被自己的实验推翻。**
+> 其中三条（B-26/B-27/B-28）是同一件事的三个面：代码错→断言假绿→实验设计不成立。
+
+### B-26 ★★★ 状态机到了 active，话题在，定时器在跑，但一个字节也发不出去
+
+- **现象**：升级成 `LifecycleNode` 后首跑验收：`ros2 lifecycle get` 回 `active [3]`，`ros2 topic list`
+  有 `/dmp/frames`，`publishRules()` 与 `tickLink()` 都执行了（日志里能看到 activated），
+  网关侧 `STATS ok=60 → 528` 证明数据在出——但订阅端 6s 采样 **0 批**。独立进程与组合容器两路全零。
+- **误判路径**：先怀疑组件模式的执行器没转（去查 `ros2 component types`，它列出了我的插件，
+  正常）；再怀疑 `__node` 重映射把发布器弄到了另一个命名空间（话题名实际在，排除）；
+  又怀疑两个回调组在单线程容器里饿死（换 mt 仍然 0，排除）。三个方向都能解释"零"。
+- **根因**（读 Humble 头文件钉死）：`create_publisher` 内部 `add_managed_entity(pub)`；基类
+  `LifecycleNode` **只实现了 `on_activate` / `on_deactivate` 两个 override**（其余回调留给用户），
+  它们的职责就是遍历托管实体翻 `is_activated`。我 override 了却没链回去 ⇒ 闸门永不打开，
+  `LifecyclePublisher::publish()` 在 `if (!is_activated()) return;` 处全数丢弃。
+  **一个根因同时解释两个 0**，而我当时当两个 bug 排了一轮。
+- **修复**：`CallbackReturn ret = LifecycleNode::on_activate(prev);` 置于**最前**（先开门再发），
+  `on_deactivate` 里置于**最后**（先停生产者再关门）。提交 `fdc787d`。
+- **可讲点**：框架把"你必须做的事"实现成"你 override 就会遮盖的事"时，接口上没有任何提醒。
+  判断依据不是"能不能编译"，而是**基类到底实现了哪几个虚函数**——只实现两个不是巧合。
+- **证据**：`grep -n 'on_activate\|on_deactivate' /opt/ros/humble/include/rclcpp_lifecycle/rclcpp_lifecycle/lifecycle_node.hpp`
+  只有这两个是 `override`；日志里的铁证是
+  `[WARN] [LifecyclePublisher]: Trying to publish message on the topic '/dmp/frames', but the publisher is not activated`。
+
+### B-27 ★★★ 一条永远为真的断言不是证据："inactive 零数据"当时是假 PASS
+
+- **现象**：上面那个 bug 存在时，验收脚本里 `inactive 零数据`、`deactivate 后再次零数据` 两条全 PASS。
+  报告上看是"PASS=9 FAIL=1，守卫生效，只是激活路径有问题"。
+- **误判路径**：我差点就改完 `on_activate` 直接宣布"契约已验证"——因为那两条本来就是绿的。
+- **根因**：发布器从未激活时，"未激活因此零数据"与"有数据"在观测上完全相同。
+  那两条断言当时测的是**我的 bug**，不是守卫。
+- **修复**：把口径写进脚本头部——**"零数据"类断言只有在同一脚本能证明"该有数据时确实有"
+  的前提下才成立**；`[2]inactive零` 与 `[3]active有数据` 必须同批看，不得各自报功。
+- **可讲点**：负例断言需要一个**同量纲的正例**做对照，否则它在系统坏得彻底时也会绿。
+  这是 B-02（拿全局行数做断言）的镜像：一个是"第一次绿只说明环境干净"，一个是"一直绿可能只说明它不会红"。
+- **证据**：修复前后两轮输出对比——修前 `active 期间采样 {"count": {}}` FAIL；修后 30 批 PASS，
+  同时 inactive 仍为 0（这次才是守卫生效）。
+
+### B-28 ★★★ 我为了证明架构决策而设计的实验，把决策本身推翻了
+
+- **现象**：ADR 里写的是"单线程容器里一次 80ms 同步回读会把同容器其它设备的帧发布拖住
+  （头阻塞），所以两个回调组必须配多线程容器才有意义"。第一次 A/B：mt 216ms / st 243ms，
+  几乎相等——看着像"多线程没用"。
+- **误判路径**（两层，各错一次）：
+  ① 先以为是 hammer 太轻——确实错：串行调用一次只阻 86ms，而 bed02 帧的**自然节律就≈200ms**
+  （上游 simulator 5Hz 限速），阻塞沉在噪声底以下；
+  ② 改成窗口式 hammer（不等上一个回复就发下一个，K=8）后队列真的排起来了（201 次调用，
+  平均往返 650ms），**但数据面仍然不动**；再把 K 拉到 32 也一样。到这里才能说"不是实验没做够"。
+- **根因**：单线程执行器在两个 86ms 处理之间仍会把到期的定时器插进去，所以损害被
+  **"单个回调时长"封顶，不随队列总长放大**。我原本把"头阻塞"想成了"队列总长会堆积"。
+  （机制解释与数据一致，但我没在 Humble 二进制里读到 `executor.cpp` 源码，所以只当解释不当结论。）
+- **修复**：不改代码，**改结论**。ADR-003 的 D 从"性能必需"降级为"便宜的保险"；
+  R-003 的控制措施从"多线程容器"改成"任何单个回调必须短（现最长≈90ms，且永不在回调里落库）"；
+  并在脚本里加了**实验有效性自检**（st 的 busy 未达空载基线 2× 则自动打 `[实验无效]`）。
+- **可讲点**：两个假设对撞的实验才能得出信息。"串行一次 86ms 会卡住别人"与"队列长度会卡住别人"
+  是同一个故事的两个版本，第二个版本才是能被 K=8/K=32 两列数据区分的。
+  以及：**基线不是自己设定的参数**（我拿 `batch_period_ms=50` 当基线，实际基线由上游 5Hz 决定，
+  高估了 4 倍灵敏度）。
+- **证据**：`mt` 202/210 · `st` 212/250 · K=32 时 `mt` 223/250 · `st` 260/270（空载/打满，ms），
+  >400ms 停顿全部 0 次；控制面自己：`calls=201 peak_inflight=8 ctl_avg=650ms`。
+
+### B-29 ★★ OBJECT 库不编 PIC：两个可执行文件全绿，只有组件 `.so` 链不起来
+
+- **现象**：`bridge_node` 与 `dmp_bridge` 两个目标都链接成功，只有 `libdmp_bridge_component.so` 报
+  `relocation R_X86_64_PC32 against symbol 'g_rcutils_logging_initialized' can not be used when making
+  a shared library: recompile with -fPIC`。
+- **误判路径**：以为是某个依赖包缺了 PIC 版本（`g_rcutils_logging_initialized` 这个名字太可疑），
+  差点去查 rcutils 安装。
+- **根因**：`add_library(... OBJECT)` 默认**不继承** `CMAKE_POSITION_INDEPENDENT_CODE`，
+  而 OBJECT 库的 `.o` 要同时喂给 exe 和 `.so`。错误信息在链接期，但真正错的是**编译期选项**。
+- **修复**：包级 `set(CMAKE_POSITION_INDEPENDENT_CODE ON)`（不是给单目标加，这样以后新增目标不会重踩）。
+  同时订正我自己注释里"OBJECT 库能避开 RPATH 坑"的不完整论述——它确实避开 RPATH，但带进 PIC 义务。
+- **可讲点**："谁消费这个目标"决定它的编译选项；同一份 `.o` 进两种产物时，以要求更严的那个为准。
+
+### B-30 ★★★ bundle 缺前置提交 → fetch 失败 → 脚本继续 → 交出"旧代码编译通过"的假绿报告
+
+- **现象**：`tools/vm_ros2_build.sh` 报 `BUILD_RC=0`、ctest 全绿，但本轮新加的文件根本不在 VM 上。
+- **误判路径**：我第一反应是 colcon 缓存，差点去 `rm -rf build/` 重跑——那只会再一次得到同样的假绿。
+- **根因**：bundle 以 `2e3ecd0..main` 打包，要求前置提交 `2e3ecd0` 在目标机存在，而 VM 还在
+  `defab3d`。`git fetch` 打的是 `Repository lacks these prerequisite commits`，**退出码非 0
+  但脚本没看**，后面照旧构建——测的是上一版代码。
+- **修复**：`git fetch ... || exit 3` + `[ HEAD = FETCH_HEAD ] || exit 4` 两道守卫；
+  同时保留一个故意宽松的口径（不用"HEAD 变了"做判据，已同步时会误报）。
+- **可讲点**：同步类脚本里**任何一步失败后继续跑的构建，都可能在验一份旧代码**。
+  "全绿"不是证据，"HEAD 等于我期望的那一个"才是。另：`git bundle verify` 只能在仓库外验证
+  **包自身**，验不了目标机有没有前置提交（B-23 的同族）。
+
+### B-31 ★★ 取证手段第二次自己造假：`timeout` 的余量不是"给一点"，而是要算
+
+- **现象**：`hammer.log` 里没有 `calls=... ctl_avg_ms=...`，只有一段 `KeyboardInterrupt` traceback
+  （卡在 `spin_until_future_complete`）。数字全丢，还得重跑一轮 4 分钟的 A/B。
+- **根因**：内层主循环 `dur=12s`，外层 `timeout -s INT 12`——完全同周期。最后一轮调用必定
+  越到边界，SIGINT 落在 print 之前。第二轮我把外层改成 `dur+8`，而内层又加了 6s 排空期限，
+  **两个数字又重合了**（K=32 那一行仍是 KeyboardInterrupt）。
+- **修复**：外层时限按 `dur + 最坏排空时间(K × 单请求耗时) + 余量` 算，现取 `dur+16`；
+  并把这条口径写在脚本注释里。
+- **可讲点**：这是 B-03（SIGTERM 不 flush 造成"0 条"）的**同族重现**——同一个错误我犯了两次，
+  只是换了形式（一次是丢缓冲，一次是跳过 print）。教训：取工具的超时与被测循环周期
+  **不得来自同一个表达式**。
+- **同族第二例**（本轮）：`vm_realdevice_e2e.sh` 里我把 `pkill -f bridge_node` 写在了 launch **之后**，
+  它杀掉的是脚本自己刚起的桥——与 B-08 同模式但方向相反（那次误杀自己，这次误杀自己的孩子）。
+  已移到 launch 之前，并把反例写进注释。
+
+### B-32 ★★ API 探针全绿、真编仍错："零猜测"的边界是不猜 API，不是不编译
+
+- **现象**：写代码前在 VM 上跑了一轮探针，确认了 `LifecycleNode` 继承关系、`create_service` 签名、
+  `create_wall_timer` 可用；结果真编还是错了两处：
+  `'CallbackReturn' does not name a type`（×5）与 `discards qualifiers`（×2）。
+- **根因**：① `.cpp` 里的**类外定义**，返回类型出现在 `DmpBridgeNode::` 之前时查找还在名字空间
+  作用域，看不到基类嵌套类型——需 `using CallbackReturn = ...::LifecycleNodeInterface::CallbackReturn;`；
+  ② Humble 的 `get_current_state()` **不是 const 成员**，所以 `isActive() const` 直接报错。
+- **修复**：加 using 别名；`isActive()`/`stateLabel()` 去 const（跟基类一起）。
+- **可讲点**：探针能钉死**接口存在与签名**，钉不死**名字可见性与 const 正确性**。
+  这两类错误编译器会直接报出来（免费的诊断信息），所以"先探针后写码"不是省掉编译，而是省掉**猜**。
+
+### B-33 ★★ 文档里写错的机制描述，比代码 bug 活得更久
+
+- **现象**：我先前在 ADR-003 与脚本头部写的是：未激活的 `publish()` **静默丢弃**，
+  `should_log_` 首次激活前为 false，"连一句 warn 都没有"。
+- **根因**：凭印象。源码里 `should_log_(true)` 是**初值**，第一次丢弃会 WARN 一次再置 false；
+  坑在于一个激活周期只有一句，且 logger 名是固定的 `"LifecyclePublisher"` 而不是节点名。
+  本轮诊断时我恰恰是按节点名 grep 日志，正好漏看了那一句。
+- **修复**：三处描述统一订正（ADR 事实清单 / `bridge_node.cpp` configure 注释 / 脚本头部），
+  并把"必须链回基类"作为独立一条事实加进去。
+- **可讲点**：错误的机制描述会让人**不去看那条存在的信息**，它比没有信息更坏；
+  而且它会以注释的形式活过所有代码重构。
+
+### B-34 ★ 编辑工具的模糊匹配会把错字写进文件
+
+- **现象**：本轮三次：R-007 行 `畸形` 被写成 `疪形`；ADR 表里 `跨周期` 被我打成 `跳周期`；
+  `目前` 被写成 `现结`。
+- **根因**：两类——工具对 original_text 做近似匹配（第一次），与我自己在 new_text 里的输入错（后两次）。
+  共同点是**它们都能静默通过**。
+- **修复/约束**：每次 SearchReplace 后读回 diff；可疑词用 Grep 正则复验（如 `[癒疪]`）。
+- **可讲点**：自动化工具的产出也是"未验证的第三方提交"——review 它的方式跟 review 同事代码一样：看 diff。
+
+---
+
+## 8. 追加模板
 
 ```markdown
 ### B-XX ★? <一句话标题>

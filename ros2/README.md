@@ -54,6 +54,9 @@ bash tools/vm_qos_mismatch.sh
 
 # 5) 跨机真板验收（需先在 Windows 侧起 gateway_service --serial COM4）
 bash tools/vm_realdevice_e2e.sh 192.168.109.1 9100 bed01
+
+# 6) 生命周期三层负例 + 组件容器 A/B（需要 bridge_node 与组件 .so 都已 install）
+bash tools/vm_lifecycle_compose.sh
 ```
 
 `tools/vm_*.sh` 一律不用 `set -e`：这些脚本的价值在于**把每一步真实结果都打出来**，
@@ -90,6 +93,37 @@ bash tools/vm_realdevice_e2e.sh 192.168.109.1 9100 bed01
 
 验收脚本会**自己把现场还原**（末尾恢复 HR 默认区间）——而“还原”必须在 kill 桥之前，
 因为服务提供方就是桥自己。
+
+## 生命周期与组件容器（c8）：契约验了，性能理由被自己的实验推翻
+
+桥现在是 `LifecycleNode`，并可以组件形式装进容器。**默认不 autostart**：
+
+```bash
+ros2 lifecycle set /dmp_bridge_bed01 configure   # -> inactive: 话题/服务存在, 零数据
+ros2 lifecycle set /dmp_bridge_bed01 activate    # -> active:    数据面与判定链路启动
+ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 mt:=true
+# 组合场景的状态转换**只能外部驱动**（Humble 的 ChangeState 匹配不到 dlopen 出来的组件）
+```
+
+三个阶段各自可断言（`tools/vm_lifecycle_compose.sh` 实测 **PASS=10 FAIL=0**）：
+
+| 阶段 | 话题/服务 | 数据 | 写路径 |
+|---|---|---|---|
+| unconfigured | 都不存在（`change_state` 除外） | — | 服务不存在，不是"拒答" |
+| inactive | 都在 | 6s **0 批** | `accepted=False reason='bridge not active (state=inactive)'`；`get_rules` 仍可读 |
+| active | 都在 | 6s **30 批**（最大间隔 250ms） | `accepted=True` |
+| cleanup 后 | `/dmp/frames` 从图上消失 | — | 这是 publisher 真被释放的唯一外部证据 |
+
+两个当时想错的地方（完整推导见 `docs/adr/ADR-003` 与素材录 §7）：
+
+1. **`on_activate` 必须链回基类**。Humble 的 `LifecycleNode` 只实现了 `on_activate`/`on_deactivate`
+   两个 override，职责就是遍历 `add_managed_entity()` 登记的发布器翻开关。override 之后不链回去：
+   状态到 `active`、话题在、定时器在跑、`publish()` 全被丢——只留一句 logger 名为
+   `LifecyclePublisher`（不是节点名）的 WARN。一个根因同时解释两个"零数据"。
+2. **"头阻塞"没测出来**。同容器两台设备，把 bed01 控制面打到持续排队（201 次调用、平均往返 650ms），
+   bed02 帧最大间隔只从 212ms 变到 250ms（自然节律就≈200ms），批数 60→60，>400ms 停顿 0 次；
+   并发窗口 8→32 仍无差别。**mt 与 st 在本负载下无可测差异**，两个回调组因此从"性能必需"
+   降级为"便宜的保险"；真正的控制点是"任何单个回调都得短"（现最长≈90ms）。
 
 ## QoS 事故复盘：我原来的假设是反的
 
@@ -153,7 +187,7 @@ POSIX 的 `nfds` 必须是 **max_fd + 1**，传 0 等于"一个描述符都不�
 |---|---|---|
 | 多行文本应答定界 | 「期望前缀 + 静默期 `quietMs`」组合判定结束 | 网关协议加 `END` 帧（要动协议版本，暂不做） |
 | 桥不落库 | 落库/回放留在上位机侧 | 若要在 ROS 侧回放，用 `rosbag2` 而不是桥里再造一套存储 |
-| 每设备一节点一前缀 | 机队扩展不改代码，`launch` 传 `device_id` | 未来接 `lifecycle` 做受控启停（见路线图） |
+| 每设备一节点一前缀 | 机队扩展不改代码，`launch` 传 `device_id`；也可装进一个容器（`dmp_bridge_composed.launch.py`） | ✅ 已接 lifecycle（受控启停）；但 mt 容器的**延迟收益本轮未测出**，见上节 |
 | 丢弃计数分两处 | `bridge_dropped`（本桥缓冲溢出）与网关 `dropped` 分开 | 合并会掩盖是哪一段丢的，故意不合并 |
 
 ## 下一步

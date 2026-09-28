@@ -11,10 +11,13 @@
 #     = 50 个进程 + 50 份 DDS 参与者, 内存和发现协议的开销都是线性的。
 #   * 组件模型把 N 个桥塞进一个容器: 共享一份 DDS 参与者, 切换只需要 launch 参数。
 #   * 代价是一条**并发契约**: 同一个 SingleThreaded 容器里, 一个回调阻塞 = 全容器阻塞。
-#     本桥的 tickRules/set_rule 会对网关做**同步** RPC (RULES 多行回读带约 80ms 静默期),
-#     正好是会造成"头阻塞"的那类回调 —— 所以节点里刻意分了 grpData_/grpCtl_ 两个回调组,
-#     并且必须配 mt:=true 才有效 (两个回调组喂给单线程容器 = 白写)。
-#     A/B 数字请用 tools/vm_lifecycle_compose.sh 量, 别听我说。
+#     本桥的 tickRules/set_rule 会对网关做**同步** RPC (RULES 多行回读带约 86ms), 属于会阻塞的
+#     那类回调 —— 所以节点里刻意分了 grpData_/grpCtl_ 两个回调组, 并用 mt:= 在 ST/MT 容器间切。
+#   * 但 mt 到底买到了什么? **本轮 A/B 没测出差别** (2026-09-29 实测, 详见 ADR-003):
+#     把 bed01 的控制面打到持续排队 (~200 次调用, 平均往返 650ms), 同容器 bed02 的帧最大间隔
+#     只从 212ms 变到 250ms (基线自然节律就≈200ms), 批数 60→60, >400ms 的停顿 0 次。
+#     所以 mt:=false 这一路**不是"错误用法"**, 它是那台能把我假设证伪的对照机 ——
+#     留开关而不是一句注释, 正是为了今天能被自己推翻。量法: tools/vm_lifecycle_compose.sh。
 #
 # 关于生命周期 (这是 Humble 的真实边界, 不是本项目偷懒):
 #   dmp_bridge.launch.py 里那套 OnProcessStart -> ChangeState 自动激活链**在这里用不上**:

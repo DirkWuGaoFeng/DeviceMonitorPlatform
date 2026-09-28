@@ -46,20 +46,21 @@ chk() {  # chk <说明> <实际> <期望>
 
 # 记录 /dmp/frames 各来源(frame_id)的到达间隔。订阅 QoS 必须 best_effort:
 # 桥默认发 sensor(best_effort), 用 reliable 订阅会得到"零数据", 那测的是 QoS 不是生命周期。
-recorder() {  # recorder <秒> <输出json文件>
-  timeout -s INT $(( $1 + 3 )) python3 - "$1" > "$2" 2>/dev/null <<'PY'
+recorder() {  # recorder <秒> <输出json文件> [停顿阈值ms=400]
+  timeout -s INT $(( $1 + 3 )) python3 - "$1" "${3:-400}" > "$2" 2>/dev/null <<'PY'
 import json, sys, time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from dmp_msgs.msg import DeviceFrameArray
-dur = float(sys.argv[1])
-last, cnt, gap = {}, {}, {}
+dur = float(sys.argv[1]); thr = float(sys.argv[2])
+last, cnt, gap, stall = {}, {}, {}, {}
 def cb(m):
     t = time.monotonic(); fid = m.header.frame_id or '?'
     if fid in last:
         g = (t - last[fid]) * 1000.0
         if g > gap.get(fid, 0.0): gap[fid] = g
+        if g > thr: stall[fid] = stall.get(fid, 0) + 1
     last[fid] = t; cnt[fid] = cnt.get(fid, 0) + 1
 rclpy.init(); n = Node('dmp_gap_probe')
 n.create_subscription(DeviceFrameArray, '/dmp/frames', cb,
@@ -67,7 +68,55 @@ n.create_subscription(DeviceFrameArray, '/dmp/frames', cb,
 t0 = time.monotonic()
 while time.monotonic() - t0 < dur:
     rclpy.spin_once(n, timeout_sec=0.05)
-print(json.dumps({'count': cnt, 'max_gap_ms': {k: round(v, 1) for k, v in gap.items()}}))
+r = lambda d: {k: round(v, 1) if isinstance(v, float) else v for k, v in d.items()}
+print(json.dumps({'count': cnt, 'max_gap_ms': r(gap), 'stalls': r(stall), 'thr_ms': thr}))
+PY
+}
+
+# hammer <日志> <秒> <并发窗口>：故意**不**等上一个回复就发下一个。
+# 为什么必须成批 in-flight: 一次 set_rule 只阻 86ms, 而 bed02 帧的自然节律≈200ms ——
+# 单发的阻塞低于噪声底, st/mt 两列会几乎相等, 看着像"多线程没用", 实际是实验没造出现象。
+# 窗口 K=8 是把一次 86ms 拼成一条 ~700ms 的持续队列, 才能跨过 200ms 的自然节律。
+# 结果预注 (诚实起见写完再跑): 队列确实排起来了(往返均值 650ms), 但**数据面根本不动** ——
+# st 与 mt 四种组合下最大间隔都在 210~270ms。所以本轮的结论是"头阻塞假设在此负载下不成立",
+# 数字与降级后的说法见 docs/adr/ADR-003。不要拿本脚本当"多线程有用"的证据。
+hammer() {
+  local out=$1 dur=$2 kwin=$3
+  # 外层 timeout 必须 > 主循环 dur + 最坏排空时间 + 余量: 只给 dur (或恰好等于 dur+排空期限)
+  # 会在最后一轮调用/排空里被 SIGINT 打断, print 来不及执行 -> 日志里只剩一段 KeyboardInterrupt
+  # traceback, 数字全丢 (K=8 与 K=32 都真实发生过: 内层排空期限是 6s, 外层给 dur+8 就是刀尖重合)。
+  timeout -s INT $(( dur + 16 )) python3 - "$dur" "$kwin" > "$out" 2>&1 <<'PY'
+import sys, time
+import rclpy
+from rclpy.node import Node
+from dmp_msgs.srv import SetRule
+dur, kwin = float(sys.argv[1]), int(sys.argv[2])
+rclpy.init(); n = Node('dmp_ctl_hammer')
+cl = n.create_client(SetRule, '/dmp/bed01/set_rule')
+if not cl.wait_for_service(timeout_sec=10):
+    print('NO_SERVICE'); sys.exit(1)
+t0 = time.monotonic(); sent = 0; inflight = []; lat = []; peak = 0
+def reap():
+    keep = []
+    for f, t1 in inflight:
+        if f.done():
+            lat.append((time.monotonic() - t1) * 1000.0)
+        else:
+            keep.append((f, t1))
+    del inflight[:]
+    inflight.extend(keep)
+while time.monotonic() - t0 < dur:
+    while len(inflight) < kwin:
+        req = SetRule.Request(); req.kind = 2
+        req.low = 45.0 + (sent % 5); req.high = 115.0; req.message = 'hammer'
+        inflight.append((cl.call_async(req), time.monotonic())); sent += 1
+    rclpy.spin_once(n, timeout_sec=0.02); reap()
+    if len(inflight) > peak: peak = len(inflight)
+deadline = time.monotonic() + 6
+while inflight and time.monotonic() < deadline:
+    rclpy.spin_once(n, timeout_sec=0.05); reap()
+print('calls=%d peak_inflight=%d ctl_avg_ms=%.1f ctl_max_ms=%.1f  (客户端观测往返, 含排队)' % (
+    len(lat), peak, sum(lat)/max(1, len(lat)), max(lat) if lat else 0.0))
 PY
 }
 
@@ -150,31 +199,11 @@ run_ab() {  # run_ab <true=mt容器|false=st容器>
     timeout 30 ros2 lifecycle set /dmp_bridge_$d activate  >/dev/null 2>&1
   done
   sleep 3
-  recorder 12 "$LOG/gap_${tag}_quiet.json" > /dev/null 2>&1     # 空载基线
-  nohup timeout -s INT 12 python3 - "/dmp/bed01/set_rule" 10 > "$LOG/hammer_$tag.log" 2>&1 <<'PY' &
-import sys, time
-import rclpy
-from rclpy.node import Node
-from dmp_msgs.srv import SetRule
-svc, dur = sys.argv[1], float(sys.argv[2])
-rclpy.init(); n = Node('dmp_ctl_hammer')
-cl = n.create_client(SetRule, svc)
-if not cl.wait_for_service(timeout_sec=10):
-    print('NO_SERVICE'); sys.exit(1)
-t0 = time.monotonic(); i = 0; lat = []
-while time.monotonic() - t0 < dur:
-    i += 1
-    req = SetRule.Request(); req.kind = 2; req.low = 45.0 + (i % 5); req.high = 115.0
-    req.message = 'hammer'
-    t1 = time.monotonic()
-    fut = cl.call_async(req)
-    rclpy.spin_until_future_complete(n, fut, timeout_sec=5)
-    lat.append((time.monotonic() - t1) * 1000.0)
-print('calls=%d ctl_avg_ms=%.1f ctl_max_ms=%.1f' % (i, sum(lat)/max(1,len(lat)), max(lat) if lat else 0.0))
-PY
+  recorder 12 "$LOG/gap_${tag}_quiet.json" 400 > /dev/null 2>&1   # 空载基线 (停顿阈值 400ms)
+  hammer "$LOG/hammer_$tag.log" 16 8 &
   HAMMER=$!
   sleep 2      # 给 hammer 一点发现服务的时间, 否则前面两秒可能在空等, 阻塞没落在采样窗口里
-  recorder 10 "$LOG/gap_${tag}_busy.json" > /dev/null 2>&1
+  recorder 12 "$LOG/gap_${tag}_busy.json" 400 > /dev/null 2>&1
   wait "$HAMMER" 2>/dev/null
   kill "$lp" 2>/dev/null; pkill -f component_container 2>/dev/null; sleep 2
 }
@@ -188,23 +217,30 @@ tag, d = sys.argv[1], sys.argv[2]
 def g(f):
     try:
         j = json.load(open(f"{d}/gap_{tag}_{f}.json"))
-        return j['count'].get('bed02', 0), j['max_gap_ms'].get('bed02', 0.0)
+        return (j['count'].get('bed02', 0), j['max_gap_ms'].get('bed02', 0.0),
+                j.get('stalls', {}).get('bed02', 0))
     except Exception:
-        return 0, 0.0
+        return 0, 0.0, 0
 def h():
     try:
         return open(f"{d}/hammer_{tag}.log").read().strip()
     except Exception:
         return '(hammer 日志缺失)'
-qn, qg = g('quiet'); bn, bg = g('busy')
-print(f"  {tag:3s}: 空载 批数={qn:3d} 最大间隔={qg:6.1f}ms | 控制面打满 批数={bn:3d} 最大间隔={bg:6.1f}ms")
-print(f"        bed01 一次 set_rule 的服务端耗时: {h()}")
+qn, qg, qs = g('quiet'); bn, bg, bs = g('busy')
+hh = h()
+print(f"  {tag:3s}: 空载 批数={qn:3d} 最大间隔={qg:6.1f}ms 停顿(>400ms)={qs:2d} | "
+      f"控制面打满 批数={bn:3d} 最大间隔={bg:6.1f}ms 停顿(>400ms)={bs:2d}")
+print(f"        bed01 的 set_rule 队列: {hh}")
+# 实验有效性自检: 阻塞没跨过自然节律时, 两列相等是**实验失败**, 不能读成"多线程没用"。
+if tag == 'st' and bg < 2.0 * max(qg, 1.0):
+    print("        [实验无效] st 的 busy 未达 quiet 基线的 2x —— 阻塞太短或队列没排起来, 不要下结论")
 PY
 }
 echo "--- mt (component_container_mt, 两个回调组分到不同线程) ---"; show mt
 echo "--- st (component_container, 单线程: 一个回调阻塞 = 全容器阻塞) ---"; show st
-echo "  判读口径: st 的 busy 最大间隔应显著大于其 quiet 基线(≈batch_period_ms=50), 而 mt 两个数字接近。"
-echo "  若 st≈mt, 说明本轮实验没造出足够长的阻塞 —— 是实验失败, 不要读成[多线程没用]。"
+echo "  判读口径: 帧的自然节律≈200ms(仿真器 5Hz), 所以基线不是 batch_period_ms=50 —— 阈值取 400ms。"
+echo "  预期: st 的 busy 最大间隔/停顿次数显著高于其 quiet 基线, mt 两行接近。"
+echo "  若 st≈mt, 说明本轮实验没造出足够长的阻塞 —— 是实验失败, 不要读成[多线程没用] (脚本已自动打[实验无效])。"
 
 echo "=== [6] 汇总 ==="
 echo "  PASS=$PASS FAIL=$FAIL   (Q3 的状态机断言全部走这几个 PASS/FAIL, 不靠人眼看日志)"
