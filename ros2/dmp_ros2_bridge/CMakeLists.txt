@@ -28,8 +28,15 @@ target_include_directories(dmp_gateway_client PUBLIC
 target_link_libraries(dmp_gateway_client PUBLIC Threads::Threads)
 
 add_executable(bridge_node src/bridge_node.cpp src/bridge_main.cpp)
-target_link_libraries(bridge_node PRIVATE dmp_gateway_client)
-ament_target_dependencies(bridge_node rclcpp std_msgs diagnostic_msgs dmp_msgs)
+# 统一用 keyword 签名: ament_target_dependencies 内部走 plain 签名,
+# 与上面的 PRIVATE 混用会让 CMake 报 "all-keyword or all-plain"。
+# ROS2 依赖改用各包导出的 imported target (Humble 起 rclcpp::rclcpp / ${PKG_TARGETS})。
+target_link_libraries(bridge_node PRIVATE
+  dmp_gateway_client
+  rclcpp::rclcpp
+  ${std_msgs_TARGETS}
+  ${diagnostic_msgs_TARGETS}
+  ${dmp_msgs_TARGETS})
 
 install(TARGETS bridge_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
