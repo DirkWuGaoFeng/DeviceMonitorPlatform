@@ -1,0 +1,10 @@
+# 只读自检: 对应网关 STATS + ALARMS + RULES 的聚合, 不做任何写操作
+string probe
+---
+bool healthy
+uint64 ok
+uint64 crc_err
+uint64 dropped
+uint32 rule_count
+uint32 recent_alarms
+string detail

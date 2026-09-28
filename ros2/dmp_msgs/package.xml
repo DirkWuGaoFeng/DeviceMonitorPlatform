@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dmp_msgs</name>
+  <version>0.1.0</version>
+  <description>
+    DeviceMonitorPlatform 遥测消息定义: 协议保真层 (DeviceFrame/DeviceFrameArray,
+    与固件 12 字节帧一一对应) + 配置层 (Rule) 与三个服务 (Selftest/SetRule/GetRules)。
+    诊断视图刻意复用标准 diagnostic_msgs, 不在本包内重造。
+  </description>
+  <maintainer email="1157932954@qq.com">DirkWu</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

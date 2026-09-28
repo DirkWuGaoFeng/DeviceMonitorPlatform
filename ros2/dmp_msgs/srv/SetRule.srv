@@ -1,0 +1,9 @@
+# 阈值下发: 只改告警判定, 不影响测量/解码链路; 服务端幂等 (同 kind 覆盖)
+uint8  kind
+float32 low
+float32 high
+string message
+---
+bool   accepted
+string reason
+Rule   applied           # 回显服务端实际生效值 (而非调用方声称值)
