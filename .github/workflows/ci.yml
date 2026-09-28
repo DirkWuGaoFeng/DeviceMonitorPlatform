@@ -1,0 +1,109 @@
+name: CI
+
+# 目标: 把"137 项断言全绿"从口头承诺变成每次推送自动执行的门禁。
+# 分工:
+#   linux   —— 主门禁 (gcc/clang × Debug/Release), 与本地 WSL 实测同构, 零外部依赖
+#   windows —— MSYS2 ucrt64 MinGW 工具链 (官方 action, 不猜 runner 预装状态)
+#   qt      —— 咨询性质 (continue-on-error): 证明 Qt6 上位机 + --verify 无头自检可编可跑,
+#              装 Qt/系统图形依赖偶发不稳, 故不参与红绿灯判定
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 门禁腿: 已在本地 WSL Ubuntu (gcc + Ninja) 实跑全绿
+          - { name: gcc Release,   cc: gcc,   cxx: g++,      bt: Release, experimental: false }
+          - { name: gcc Debug,     cc: gcc,   cxx: g++,      bt: Debug,   experimental: false }
+          # 咨询腿: 未在本地验过 (本机 WSL 无 clang), 跑通后可转正为门禁
+          - { name: clang Release, cc: clang, cxx: clang++,  bt: Release, experimental: true  }
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          cmake --version | head -1
+          ${{ matrix.cc }} --version | head -1
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.bt }}
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DDMP_BUILD_QT=OFF
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit & integration tests (ctest)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Assertion summaries (evidence in log)
+        run: |
+          for t in test_protocol test_storage test_frame_parity test_pipeline test_service_proto; do
+            printf '%-20s ' "$t"; ./build/$t | tail -1
+          done
+
+  windows:
+    name: Windows · MinGW (MSYS2)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDMP_BUILD_QT=OFF
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit & integration tests (ctest)
+        run: ctest --test-dir build --output-on-failure
+
+  # 咨询性质: Qt 装失败不影响整体红绿灯
+  qt-linux:
+    name: Linux · Qt6 上位机 (--verify 无头自检)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: qtcharts
+          aqtversion: '==3.1.*'
+
+      - name: Build qt_monitor
+        run: |
+          cmake -S . -B build_qt -G Ninja -DDMP_BUILD_QT=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_qt --target qt_monitor -j
+
+      - name: Headless verify (解码=drain=落库=曲线 四方计数一致)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./build_qt/qt_monitor --verify

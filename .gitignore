@@ -1,0 +1,23 @@
+# 构建产物 (build*/ 涵盖 build_qt / build_wsl / build_ci 等本地实验目录)
+build/
+build*/
+*.exe
+*.obj
+*.o
+*.a
+*.log
+
+# 测试/运行期产物
+_dmp_storage_test*.csv
+qt_demo_stat.txt
+
+# IDE
+.claude/
+.idea/
+.vs/
+*.user
+
+# 运行期数据
+*.db
+*.db-wal
+*.db-shm

@@ -1,0 +1,62 @@
+// proto/telemetry.proto — 遥测网关的 gRPC 契约 (与 dmp/service_proto.h 文本协议同语义)
+//
+// 定位: 本项目当前用"文本行 TCP 网关"落地服务层(本机无 gRPC 工具链)。本文件是同语义的
+//   gRPC 版本契约: 业务层(Acquisition/告警) 不变, 仅把 gateway_service.cpp 的
+//   recv/parse/send 换成下面的 gRPC service 实现即可 (protoc + grpc_cpp_plugin 生成桩)。
+//   这也是把 8 年通信/网管侧的 RPC 经验迁移到医疗设备平台的桥接点。
+//
+// 生成(工具链就绪时):
+//   protoc --cpp_out=gen --grpc_out=gen --plugin=protoc-gen-grpc=<grpc_cpp_plugin> telemetry.proto
+//   在 CMake 里用 find_package(Protobuf/gRPC) + FetchContent 引入。
+syntax = "proto3";
+
+package dmp.telemetry;
+
+option cc_enable_arenas = true;
+
+// 一次测量样本 (对应固件/上位机 12 字节帧解码后的语义)
+message Sample {
+  uint32 seq     = 1;   // 帧序号 (16 位回绕)
+  uint32 channel = 2;   // 通道号
+  enum Type {
+    UNKNOWN = 0;
+    TEMPERATURE = 1;
+    HEART_RATE = 2;
+    SPO2 = 3;
+    CONCENTR = 4;
+    PRESSURE = 5;
+  }
+  Type type = 3;        // 量纲类型
+  float  value = 4;     // 测量值
+  uint64 ts_ms = 5;     // 采集侧接收时间戳 (epoch ms)
+}
+
+// 阈值告警事件
+message AlarmEvent {
+  Sample sample  = 1;
+  string message = 2;
+  bool   critical = 3;
+}
+
+// 采集链路健康度 (对应文本协议 STATS)
+message Stats {
+  uint64 ok      = 1;   // 成功解帧数
+  uint64 crc_err = 2;   // CRC 校验失败数
+  uint64 dropped = 3;   // 环形缓冲满丢弃数 (背压信号)
+}
+
+message AlarmsRequest { uint32 limit = 1; }   // limit=0 → 服务端默认
+
+// 遥测服务: 设备数据经网关解码后, 对上位机/云端暴露的读接口 + 实时订阅
+service Telemetry {
+  rpc GetStats(Empty) returns (Stats);                 // 拉取健康度
+  rpc GetAlarms(AlarmsRequest) returns (stream AlarmEvent); // 拉取最近告警
+  rpc Subscribe(SubscribeRequest) returns (stream Sample);  // 实时样本流 (服务器推送)
+}
+
+message SubscribeRequest {
+  repeated Sample.Type types = 1;   // 空 = 订阅全部量纲
+  uint32 min_interval_ms = 2;       // 采样节流, 0 = 不限流
+}
+
+message Empty {}
