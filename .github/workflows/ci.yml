@@ -10,6 +10,12 @@ name: CI
 #              (CMake configure/编译阶段), 而不是 --verify —— 后面两步是 skipped。
 #              日志正文需登录才能看, 所以下面把根因 grep 出来用 ::error:: 当注解报出去,
 #              注解在 Summary 页匿名可读 —— 这样不需要任何人给凭据也能查。
+#              注解已生效(Run #4)并拿到了具体报错行: `CMake Error at CMakeLists.txt:44
+#              (find_package)` —— 即卡在找 Qt6 组件, 不是编译也不是自检。
+#              当前假设: REQUIRED COMPONENTS 点名了 SerialPort, 而 modules: 只装了 qtcharts
+#              (Charts/SerialPort 都是 Qt 独立仓库的模块, 不随 qtbase 打包) —— 已按此把
+#              qtserialport 补上, 并用下一条注解把"假设"与"事实"分开: 若还挂,
+#              `缺组件config` 那行会直接指出哪个组件没落地。
 
 on:
   push:
@@ -99,7 +105,11 @@ jobs:
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.*'
-          modules: qtcharts
+          # 这两个必须与 CMakeLists.txt 里 find_package(Qt6 ... COMPONENTS) 的非 qtbase
+          # 组件对齐: Charts / SerialPort 都是独立模块仓库, aqt 只装这里点名的。
+          # 少写一个不是链接错, 而是 configure 阶段就挂 —— 曾经只挂 modules: qtcharts,
+          # 于是这一腿红了很久而徽章仍是绿的(日志正文要登录, 没人看到 CMake 的原话)。
+          modules: qtcharts qtserialport
           aqtversion: '==3.1.*'
 
       - name: Install Qt6 headless runtime deps
@@ -125,7 +135,17 @@ jobs:
           { cmake -S . -B build_qt -G Ninja -DDMP_BUILD_QT=ON -DCMAKE_BUILD_TYPE=Release
             echo "CFG_RC=$?"; } > cfg.log 2>&1
           if ! grep -q 'CFG_RC=0' cfg.log; then
-            echo "::error::configure 失败(本行匿名可读): $(grep -E -A1 'CMake Error' cfg.log | head -10 | tr '\n' '|')"
+            # 注解是这一腿唯一**匿名可读**的面, 所以要把根因写全: -A1 只能带到
+            # "Found package configuration file:" 就断了, "Reason given by package:" 后面的
+            # 那句真话在更下面 —— 用 -A8。再直接列出"哪些组件的 config 没落地",
+            # 这样"哪个模块没装"一行就能看出来, 不需要第二趟。
+            mods=$(find "$HOME/Qt" "$GITHUB_WORKSPACE/Qt" -name 'Qt6*Config.cmake' 2>/dev/null | sed 's#.*/##; s#Config.cmake##' | tr '\n' ' ')
+            miss=""
+            for c in Core Gui Widgets Charts Sql Network SerialPort; do
+              case " $mods " in *" Qt6$c "*) ;; *) miss="$miss Qt6$c";; esac
+            done
+            echo "::error::configure 失败(本行匿名可读): $(grep -E -A8 'CMake Error' cfg.log | head -20 | tr '\n' '|')"
+            echo "::error::缺组件config(本行匿名可读):${miss:- 都不缺, 那就不是装模块的问题}"
             echo "----- cfg.log tail -----"; tail -n 40 cfg.log
             exit 1
           fi

@@ -71,7 +71,7 @@ DeviceMonitorPlatform/
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
     ├── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
-    └── 经典Bug素材录.md         # 24 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
+    └── 经典Bug素材录.md         # 25 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
 ```
 
 ## 构建（核心，不依赖 Qt）
@@ -113,7 +113,7 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 10. [x] **接入 ROS2 Humble**（`ros2/`）：`dmp_msgs` 定契约，`dmp_ros2_bridge` 把网关的帧流与阈值面接成 `/dmp/frames`（协议保真）+ `/diagnostics`（标准 `diagnostic_msgs` 视图）+ `/dmp/rules`（锁存）+ 三个服务；VM 内实跑端到端（`ok=396 crc_err=0`，`set_rule` 写入后**从网关侧独立回读核对**，非法区间被拒）。产出 `docs/adr/ADR-001/002` + `ros2/README.md` 的 **QoS 实测矩阵**（推翻了设计时“pub reliable + sub best_effort 会静默”的错误假设，真正错的方向是 pub best_effort + sub reliable）；过程中修掉一个最贵的跨平台 bug：`device_simulator` 的 `select(0,...)` 在 POSIX 下等于不检查任何描述符，accept 永不发生（症状：“连接正常、零字节”）
 11. [x] **跨机真板接入 ROS2**（`tools/vm_realdevice_e2e.sh`）：STM32→COM4→Windows 网关→（TCP 跨机）→VM 内桥→ROS2。实测 `/dmp/frames` 33 条真帧、`/diagnostics decoded_ok=89 crc_err=0`、`selftest healthy=True ok=3034`；从 ROS 侧 `set_rule` 后**网关侧独立回读**得 `HR low=40.000 high=105.000`，倒置区间 `accepted=False`；脚本末尾自动还原现场
 12. [x] **查清 CI 那条 `exit code 1`（1）修掉一个真 bug**：本地直接跑 `qt_monitor --verify` 即复现 `db_rows=358 -> FAIL`。根因是自检拿 `SELECT COUNT(*)` **绝对值**与 N 比，而 `device_history.db` 是跨次运行的持久文件 —— **这个自检从设计上只在空库时成立**。改为增量计数后本地连跑 3 次 PASS（`+50` 恒定）
-13. [ ] **查清 CI 那条 `exit code 1`（2）结论反转**：逐步核实后，失败**步骤**是 `Build qt_monitor`（CMake configure/编译阶段），`Link check` 与 `Headless verify` 都是 **skipped** —— 所以那个 exit 1 **与 `--verify` 无关**（上面那个是独立真 bug，只是排在挂点之后）。Actions 日志正文需登录，于是把该腿改成“失败时用 `::error::` 把 `CMake Error` / `error:` / `undefined reference`  grep 成注解”——注解在 Summary 页**匿名可读**，不需要任何人交凭据。真实原因待下一次 CI 注解锁定
+13. [ ] **查清 CI 那条 `exit code 1`（2）结论反转 + 注解通道已跑通（进行中）**：逐步核实后，失败**步骤**是 `Build qt_monitor`（CMake configure/编译阶段），`Link check` 与 `Headless verify` 都是 **skipped** —— 所以那个 exit 1 **与 `--verify` 无关**（上面那个是独立真 bug，只是排在挂点之后）。Actions 日志正文需登录，于是把该腿改成“失败时用 `::error::` 把 `CMake Error` / `error:` / `undefined reference` grep 成注解”——注解在 Summary 页**匿名可读**，不需要任何人交凭据。**该设计第一次跑就生效**：拿到报错行 `CMake Error at CMakeLists.txt:44 (find_package)`，即卡在找 Qt6 组件；下一步按 `modules: qtcharts` 少了 `qtserialport`（`find_package` 点名了 SerialPort）这一假设补上依赖，并加了一条 `缺组件config` 注解把“假设”与“事实”分开——若仍挂，那行会直接指出哪个组件没落地
 
 ## 当前进度（本次已实现并本地验证 ✅）
 
@@ -157,4 +157,5 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - `select()` nfds 语义差异导致“连接正常、零字节” → 跨平台移植时现象离根因有多远
 - `--verify` 拿 `COUNT(*)` 绝对值做断言 → **自检脚本自己不可重跑**比没自检更坑
 - CI 的 exit 1 并不等于“自检判 FAIL”：先用公开 API 拿到逐步结论，发现失败在**构建阶段**，后两步 skipped → **先定住“挂在哪一步”，再谈根因**；日志不可读就把根因 grep 成匿名可读的注解
+- 本地“全选”装了全部 Qt 模块，CI 的 `modules:` 白名单少一个 → **本地永远复现不了这个差异**；依赖清单存在两个不同构的声明面本身就是 bug
 - `timeout` 默认 SIGTERM 不 flush → 被杀进程丢块缓冲，**“0 条数据”可能是取证手段自己造的假**

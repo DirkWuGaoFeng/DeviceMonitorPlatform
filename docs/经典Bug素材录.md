@@ -35,6 +35,7 @@
 | B-22 | `repeated` 枚举在 C++ 是 `RepeatedField<int>`，构造 `vector<Enum>` 触发 static_assert | 语言绑定 | ★ |
 | B-23 | `git bundle verify` 在非仓库目录跑 → 假阴性，clone 成功才是有效证明 | 取证陷阱 | ★ |
 | B-24 | CI 那个 exit 1 我一口咬定是自检逻辑——实际失败在**构建阶段**，后两步根本 skipped | 认知偏差 | ★★★ |
+| B-25 | CI 装 Qt 的 `modules:` 漏了一个，而本地全量安装永远复现不了 | 构建/环境差异 | ★★★ |
 
 ---
 
@@ -91,6 +92,28 @@
   PATH 里旧版 `libstdc++-6.dll` 抢先加载。修复是把三个 DLL 拷到 exe 同目录（exe 旁优先于 PATH）。
 - 网关 `parseCommand` 把命令统一转小写，所以新增命令词必须按小写比较；
   正解是给 `CmdKind` 加强类型枚举分支，而不是拿字符串比大写。
+
+---
+
+### B-25 ★ CI 装 Qt 的 `modules:` 漏了一个——本地全量安装，所以永远复现不了
+
+- **现象**：Windows 本地用 Qt 官方安装的 6.8.1 mingw_64 编 `qt_monitor` 全绿（Core/Gui/Widgets/
+  Charts/Sql/Network/SerialPort 全部链接成功）；Linux CI 的 `Build qt_monitor` 腿则**每次都在 configure
+  阶段挂**，而 CI 状态徽章是绿的（该腿 `continue-on-error: true`），只留一句干巴巴的 `exit code 1`。这个状态持续了好几轮。
+- **误判路径**：先归因于“缺系统图形库”（于是加了 apt 那一步）、再归因于“`--verify` 非幂等”（B-02/B-24）。
+  两个方向都不是。**注意这三个假设全部仍能在“本地绿、远端红”下成立——这正是排不掉的原因。**
+- **拿证据**：把失败腿的 `CMake Error` grep 成 `::error::` 注解（匿名可读），**第一次跑就拿到原话**：
+  `CMake Error at CMakeLists.txt:44 (find_package)` —— 第 44 行正是
+  `find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Charts Sql Network SerialPort)`。
+- **根因**：`install-qt-action` 只装 `modules:` 里点名的模块（Charts / SerialPort 是 Qt 独立仓库的模块，
+  **不随 qtbase 打包**），而我那里只写了 `qtcharts`。本地是安装向导里的“全选”，所以两边清单不同构。
+- **修复**：`modules: qtcharts qtserialport`；并把注解再推进一步——configure 失败时额外报一行
+  `缺组件config: Qt6Xxx`（拿 find_package 的组件名单去 `find -name 'Qt6*Config.cmake'` 里逐个对），
+  以及时把“假设”和“事实”分开：即使下次仍挂，那一行会直接指出哪个组件没落地。
+- **可讲点**：① **本地装了全部依赖，就永远复现不了“白名单安装”的 CI**——依赖清单得有两个独立的声明面，
+  面与面不同构就是 bug；真正稳的做法是用同一个源生成两处（组件列表 → modules 参数）。
+  ② `continue-on-error` 的软失败腿必须自带**可报警的面**，否则它红了几周也没人看；
+  ③ 拿不到日志就去拿能拿到的面（注解/步骤结论）——这一条直接把周期从“几轮猜”缩到“一轮定”。
 
 ---
 
@@ -246,6 +269,9 @@
   { cmake -S . -B build_qt ...; echo "CFG_RC=$?"; } > cfg.log 2>&1
   grep -q 'CFG_RC=0' cfg.log || echo "::error::configure 失败(本行匿名可读): $(grep -E -A1 'CMake Error' cfg.log | tr '\n' '|')"
   ```
+- **后续（一次 CI 就兑现）**：下一次跑（Run #4）的 Summary 页匿名就能看到新注解原话：
+  `configure 失败(本行匿名可读): CMake Error at CMakeLists.txt:44 (find_package):|` —— 根因见 B-25。
+  经验是：**可观测性投入的兑现周期可以短到一轮**，所以它值得和修复放在同一个提交里做，而不是“下次再说”。
 - **可讲点**：① 先定住“**挂在哪一步**”，再谈根因；步骤结论在公开 API 里就能拿到，不需要日志权限；
   ② 本地能复现的 bug 不等于远端那个 bug，**同一个症状族里可能有两个独立缺陷**；
   ③ 可观测性要设计在**自己能读的那个面上**（注解 > 步骤输出 > 日志）；
@@ -262,8 +288,10 @@
 4. 桥首次真编译抓出 4 个错（B-11/B-12/B-04 + 一个未声明成员函数）。
 5. CI 徽章绿但注解里挂一个 `exit code 1` → 本地复现 `--verify` 的 `db_rows=358 -> FAIL` → 修成增量计数
    → 连跑 3 次 PASS（B-02）。但我当时把这句当成了 CI 的根因并写进注释 —— 后续逐步核实发现 CI 其实挂在
-   `Build qt_monitor`，后两步 skipped（B-24）。真实原因等下一次 CI 的匿名注解锁定。
-6. 跨机真板验收：裸 TCP 先证网关在出帧 → 再起桥 → `/dmp/frames` 33~35 条真帧、
+   `Build qt_monitor`，后两步 skipped（B-24）。
+6. 把根因改成匿名可读面（`::error::` 注解）→ **下一轮 CI 就拿到** `CMake Error at CMakeLists.txt:44
+   (find_package)` → 发现装 Qt 的 `modules:` 漏了 `qtserialport`（B-25）。
+7. 跨机真板验收：裸 TCP 先证网关在出帧 → 再起桥 → `/dmp/frames` 33~35 条真帧、
    `/diagnostics decoded_ok=89 crc_err=0`、`set_rule` 后**网关侧独立回读** `HR low=40.000 high=105.000`、
    倒置区间 `accepted=False reason='need low < high'`、`selftest healthy=True ok=3034`。
    脚本最后自动把 HR 阈值恢复默认（验收脚本必须还原现场）。
