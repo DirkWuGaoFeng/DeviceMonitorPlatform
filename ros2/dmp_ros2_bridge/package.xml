@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dmp_ros2_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    遥测网关 <-> ROS2 桥: 把 DeviceMonitorPlatform 网关的 RAW 帧流接入 ROS2
+    (协议保真 topic + 标准 diagnostic_msgs 视图), 并把网关的 RULES/RULE 配置面
+    暴露为 ROS2 服务 (selftest / set_rule / get_rules)。
+  </description>
+  <maintainer email="1157932954@qq.com">DirkWu</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>dmp_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_cmake_test</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

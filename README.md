@@ -1,7 +1,7 @@
 # DeviceMonitorPlatform — 多仪器数据采集与监控上位机平台（骨架）
 
-<!-- 推送到 GitHub 后把下方 __OWNER__ 替换为你的仓库用户名, 徽章即生效 (本地未推不会误报) -->
-[![CI](https://github.com/__OWNER__/DeviceMonitorPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/__OWNER__/DeviceMonitorPlatform/actions/workflows/ci.yml)
+<!-- CI 状态徽章: 指向 DirkWuGaoFeng/DeviceMonitorPlatform, Actions 两条门禁腿都绿后亮起 -->
+[![CI](https://github.com/DirkWuGaoFeng/DeviceMonitorPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/DirkWuGaoFeng/DeviceMonitorPlatform/actions/workflows/ci.yml)
 
 > 招牌收敛项目。一条数据链把 **医疗上位机 / 设备平台 / AI 运维** 三个方向焊在一起：
 >

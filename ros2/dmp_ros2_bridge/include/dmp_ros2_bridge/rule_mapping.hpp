@@ -9,6 +9,8 @@
 #include "dmp/service_proto.h"   // typeName (与网关同源的名字表)
 
 #include <cctype>
+#include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -33,6 +35,22 @@ inline bool isKnownKind(uint8_t kind) {
     }
 }
 
+// 严格浮点解析: 整个 token 必须是一个数。strtod 对 "abc" 返回 0.0 且不报错,
+// 直接用它会把畸形的配置行当成"低边界为 0"的真实规则 (静默错配比拒收危重得多)。
+inline bool parseFloatStrict(const std::string& tok, float* out) {
+    if (tok.empty() || !out) return false;
+    const char* s = tok.c_str();
+    char* end = nullptr;
+    errno = 0;
+    const double v = std::strtod(s, &end);
+    if (end == s || errno != 0) return false;
+    while (end < s + tok.size() && (end[0] == '\r' || end[0] == '\n' || end[0] == ' ')) ++end;
+    if (end != s + tok.size()) return false;               // 尾巴上还有字符 ("40abc") 一律拒
+    if (!std::isfinite(v)) return false;
+    *out = static_cast<float>(v);
+    return true;
+}
+
 // 解析网关 RULES 回读行:
 //   "RULE type=2 name=HR low=40.000 high=120.000 msg=hr too fast"
 // 返回 false 表示该行不是规则 (调用方据此跳过 "+SUBSCRIBED" 之类杂散行)。
@@ -53,6 +71,9 @@ inline bool parseRuleLine(const std::string& line, dmp::AlarmRule* out) {
     if (t.empty() || lo.empty() || hi.empty()) return false;
     const int type = std::atoi(t.c_str());
     if (!isKnownKind(static_cast<uint8_t>(type))) return false;
+    float lowv = 0.f, highv = 0.f;
+    if (!parseFloatStrict(lo, &lowv) || !parseFloatStrict(hi, &highv)) return false;
+    if (!(lowv < highv)) return false;                     // 词法正确但语义非法(区间倒置/退化)也不接受
 
     std::string msg;
     const size_t mp = line.find("msg=");
@@ -61,8 +82,8 @@ inline bool parseRuleLine(const std::string& line, dmp::AlarmRule* out) {
     if (msg == "-") msg.clear();                       // 网关对空文案的占位符
 
     out->type    = static_cast<dmp::SampleType>(type);
-    out->low     = static_cast<float>(std::atof(lo.c_str()));
-    out->high    = static_cast<float>(std::atof(hi.c_str()));
+    out->low     = lowv;
+    out->high    = highv;
     out->message = msg.empty() ? kindName(static_cast<uint8_t>(type)) + " out of range" : msg;
     return true;
 }

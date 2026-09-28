@@ -64,6 +64,7 @@ private:
     GatewayClient      gw_;
     dmp::FrameDecoder  decoder_;                 // 仅读线程访问
     std::string        device_id_, gw_host_, topic_prefix_;
+    std::string        qosParam_ = "sensor";      // frame_qos 参数的落地值
     uint16_t           gw_port_ = 9100;
     int                batch_ms_ = 50, diag_ms_ = 1000, rules_ms_ = 10000, link_ms_ = 1000;
     double             warn_margin_ = 0.05;

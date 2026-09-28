@@ -21,3 +21,11 @@ qt_demo_stat.txt
 *.db
 *.db-wal
 *.db-shm
+
+# ROS2 / colcon 产物 (在 VM 内构建, 不入库)
+ros2/.build/
+ros2/.install/
+ros2/.log/
+.colcon_workspace
+install/
+log/
