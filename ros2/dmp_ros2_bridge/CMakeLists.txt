@@ -3,6 +3,13 @@ project(dmp_ros2_bridge LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# 本包所有目标一律 PIC。原因不是风格, 是一条真链接错误:
+#   relocation R_X86_64_PC32 against symbol `g_rcutils_logging_initialized' can not be used
+#   when making a shared object; recompile with -fPIC
+# 下面的 dmp_bridge_obj 是 OBJECT 库, 它的 .o 要同时喂给可执行文件与 .so —— 喂给 .so 那份
+# 就必须是位置无关码。文件头注释里我写过"OBJECT 库能避开 RPATH 坑", 那句话不完整:
+# 它确实避开了 RPATH, 但换来了"默认不编 PIC"这个新坑, 症状从 rc=127 变成一句 relocation 错。
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
