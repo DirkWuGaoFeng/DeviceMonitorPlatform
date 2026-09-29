@@ -1,12 +1,52 @@
-# DeviceMonitorPlatform — 多仪器数据采集与监控上位机平台（骨架）
+# DeviceMonitorPlatform — 多仪器数据采集与监控上位机平台
 
 <!-- CI 状态徽章: 指向 DirkWuGaoFeng/DeviceMonitorPlatform, Actions 两条门禁腿都绿后亮起 -->
 [![CI](https://github.com/DirkWuGaoFeng/DeviceMonitorPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/DirkWuGaoFeng/DeviceMonitorPlatform/actions/workflows/ci.yml)
 
-> 招牌收敛项目。一条数据链把 **医疗上位机 / 设备平台 / AI 运维** 三个方向焊在一起：
+> 一条数据链把 **医疗上位机 / 设备平台 / AI 运维** 三个方向焊在一起：
 >
 > `[下位机/仪器] ──串口/TCP──> [采集与解码] ──环形缓冲──> [存储+告警] ──> [Qt 上位机实时曲线]`
 > 上层再挂 **LLM 运维 Agent**（复用 FiberMaintain/Agent）。
+
+## 这个平台做什么
+
+一句话：**把一台仪器吐出来的二进制字节流，一路做到可看、可存、可告警、可服务化、可被生态工具消费，并且每一步都有能证伪的断言。**
+
+### 链路全景
+
+```
+[STM32 固件 firmware/  或  TCP 数据源 device_simulator]
+            │  12 字节帧 (帧头/seq/channel/type/value/CRC16)
+            ▼
+   dmp::Acquisition 解码内核  ── 粘包拆包 · 噪声重同步 · 无锁 SPSC 有界环 · 阈值判定
+            │
+            ├─► CsvSink / SQLite      落库与回放 (tests/test_storage)
+            ├─► monitor_console / monitor_serial   无 Qt 的控制台监控端
+            ├─► qt_monitor            Qt6 实时曲线 + 历史回放页 + 声光告警与人工确认
+            └─► gateway_service       二进制帧 → 文本行 API (HELP/STATS/ALARMS/HISTORY/RULES/RULE) + RAW 逐字节透传
+                     ├─► service/grpc_server      同语义 gRPC 实现 (GetStats/GetAlarms/Subscribe)
+                     ├─► ros2/dmp_ros2_bridge     /dmp/frames · /diagnostics · /dmp/rules · 三个服务 (生命周期节点)
+                     │       └─► 生态组件消费: rosbag2 录制回放、diagnostic_aggregator 聚合
+                     └─► tools/dmp_agent.py       运维 Agent: 把网关命令封装成工具做告警归因
+```
+
+### 能力清单（每条都写了它现在被怎么验的）
+
+| 能力 | 代码在哪 | 验证状态 |
+|---|---|---|
+| 帧协议编解码 + CRC16 + 粘包/拆包/噪声重同步 | `include/dmp/frame_protocol.h`、`firmware/dmp_frame_core.{h,c}` | `test_protocol` 27 断言；固件 C 内核与上位机 C++ **逐字节一致** `test_frame_parity` 41 断言 |
+| 无锁 SPSC 环形缓冲 + 有界丢弃计数 | `include/dmp/ring_buffer.h` | 含在 27 项内（10 万元素多线程不丢不重） |
+| 采集流水线（解码→缓冲→落库→告警，Sink 抽象） | `include/dmp/acquisition.h` | 阈值告警与丢弃计数由 `test_storage` 36 断言覆盖 |
+| 多线程采集（阻塞读源独立线程） | `include/dmp/pipeline.h` | `test_pipeline` 9 断言：N=5000 帧、每块 7 字节恶意拆包，不丢不重不乱序 |
+| 落库与回放（CSV / SQLite + 时间轴窗口） | `include/dmp/storage.h`、`src/qt_monitor.cpp` | `test_storage` 36；Qt 侧 `--verify` 50/50（解码=drain=落库增量=曲线对齐） |
+| 控制台上位机（TCP / 裸串口两种源） | `src/monitor_console.cpp`、`src/monitor_serial.cpp` | 端到端冒烟 ok 递增、crc_err=0、drop=0 |
+| Qt6 上位机（滚动曲线 + 危急值横幅 + 历史回放 + 声光告警与人工确认） | `src/qt_monitor.cpp` | 编译链接通过 + `--verify` 无头自检；GUI 交互需桌面会话 |
+| 遥测网关（1 上游 → N 客户端扇出，文本 API + RAW 透传） | `src/gateway_service.cpp`、`include/dmp/service_proto.h` | `test_service_proto` 58 断言 + `gw_probe.ps1` 手验；**已知未消减缺陷 R-009**（慢客户端可卡死主循环，见 `docs/网关与服务链路优化方案.md`） |
+| gRPC 服务层（同语义第二实现） | `proto/telemetry.proto`、`service/` | WSL2 内编成真服务；真机全链路 `e2e_realdevice.sh` |
+| ROS2 桥（保真话题 + 标准诊断视图 + 只写判定层的配置服务 + 生命周期） | `ros2/dmp_ros2_bridge`、`ros2/dmp_msgs` | 桥纯函数层 62 断言；VM 实跑：生命周期验收 **25 条**、下游联动 **22 条** `PASS=22 FAIL=0 SKIP=0` |
+| LLM 运维 Agent（自然语言→告警归因） | `tools/dmp_agent.py` | 离线确定性模式 CI 可跑；真机实跑给出归因结论 |
+| 合规与可追溯（IEC 62304 / ISO 14971） | `docs/IEC62304-软件生命周期与风险管理.md` | SR-001~013 双向闭环；SR-014~017 与 R-009 **待实施**，不计入全绿口径 |
+| 质量门禁 | `.github/workflows/ci.yml` | Linux gcc/clang + Windows MinGW + Linux Qt6 腿，`ctest` 跑 171 项核心断言 |
 
 ## 目录结构
 
@@ -70,15 +110,37 @@ DeviceMonitorPlatform/
     ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层, ADR-003 桥生命周期化与组件化
     ├── architecture.md         # 架构设计
     ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~013；SR-014~017 待实施) + 风险分析(R-001~009)
-    ├── 网关与服务链路优化方案.md   # DMP-OPT-001 待评审: 慢客户端隔离(R-009) / Qt 经网关取数 / 原生 Linux 形态 / 多设备纳管
+    ├── 网关与服务链路优化方案.md   # DMP-OPT-001 v1.1 已定案、待实施: 慢客户端隔离(R-009) / Qt 经网关取数 / 原生 Linux 形态 / 多设备纳管
     ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南（WSL2 **仅作构建/工具链沙箱**，不作为交付运行环境，见 IEC62304 §1）
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
     ├── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
-    └── 经典Bug素材录.md         # 52 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
+    └── 经典Bug素材录.md         # 52 条真实 bug 的复盘（现象→误判→根因→可复用的判断）
 ```
 
-## 构建（核心，不依赖 Qt）
+## 操作方法
+
+三套环境分工写死在此，避免口径漂移（依据 `docs/IEC62304-软件生命周期与风险管理.md` §1）：
+
+| 环境 | 在这里做什么 | 不做什么 |
+|---|---|---|
+| **Windows 原生** + Qt 6.10.0 mingw_64 | Qt GUI、真机串口、网关演示、一键脚本、VM 取证驱动 | — |
+| **WSL2 Ubuntu** | 装 apt 版 gRPC 依赖、构建、合成模式自检 —— **仅构建/工具链沙箱** | 不作为交付运行环境（进不了 POUD/SOUP 论证） |
+| **Ubuntu 22.04 VM + ROS2 Humble** | colcon 构建桥、端到端/生命周期/下游联动/跨机真板验收 | 不跑 Qt GUI |
+
+想干什么 → 跑哪一节：
+
+| 目的 | 小节 |
+|---|---|
+| 只要核心库，跑 171 项断言 | 核心构建与测试 |
+| 看实时曲线 / 无头自检上位机 | Qt6 上位机 |
+| 模拟器 → 网关 → 多客户端演示 | 一键演示与网关联调 |
+| 用真板子替掉模拟器 | 接真实 STM32 |
+| 把服务层做成真 gRPC | gRPC 服务层 |
+| 接进 ROS2 并验收下游 | ROS2 桥与下游验收 |
+| 问“3 号通道为何频繁告警” | 运维诊断 Agent |
+
+### 核心构建与测试（不依赖 Qt）
 
 ```bash
 cmake -S . -B build -DDMP_BUILD_QT=OFF
@@ -86,7 +148,7 @@ cmake --build build -j
 ./build/device_simulator            # 终端A: 启动模拟设备 :9000
 ```
 
-## 构建（含 Qt6 上位机）
+### Qt6 上位机：构建与运行
 
 需安装 Qt6（Core/Gui/Widgets/Charts/Sql/Network/SerialPort）。本机用 **Qt 自带工具链**实测通过（PowerShell）：
 
@@ -102,6 +164,95 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 & .\build_qt\qt_monitor.exe --verify              # 同步自检, 打印 ... -> PASS
 # 或双击 build_qt\qt_monitor.exe, 选"串口(STM32)"或"TCP 模拟器"后点连接
 ```
+
+### 一键演示与网关联调
+
+```powershell
+.\run_demo.ps1                        # 模拟器(:9000) + Qt 上位机(自动连 TCP)
+.\run_demo.ps1 -Gateway               # 中间插一层网关(:9100 <- :9000)，Qt 连网关看订阅流
+.\run_demo.ps1 -SimPort 9010          # 换模拟器端口
+.\gw_probe.ps1                        # 对网关发 HELP/STATS/ALARMS 后退出（前提: 先跑 -Gateway）
+.\gw_probe.ps1 -Subscribe -Seconds 5  # 订阅实时 SAMPLE 推送 5 秒
+.\stop_demo.ps1                       # 异常中断后清扫残留进程；加 -WhatIf 只看不动手
+```
+
+也可以手搓：`\build\gateway_service.exe 9100 127.0.0.1 9000`，然后 `telnet/nc 127.0.0.1 9100` 手输 `STATS` / `ALARMS 5` / `SUBSCRIBE` / `HELP`。
+
+### 接真实 STM32（把数据源换成板子）
+
+```powershell
+.\deploy_firmware.ps1                 # 一键把 firmware/ 并入 Keil 工程(默认 12_usart_printf_hal)
+                                      #   拷 4 个源文件 + 按 USER CODE 标记插 3 行 + 注入 2 个编译单元(幂等, 留 .dmp.bak)
+# 之后在 Keil 里编译下载
+.\serial_check.ps1 -Port COM4         # 列 COM 口 -> 缺则现编 monitor_serial.exe -> 前台读真帧(看 ok 递增、CRC 不误报)
+.\run_qt_serial.ps1 -Port COM4        # 起 Qt GUI 并启动即连串口(--demo-serial COM4)
+.\run_gateway_serial.ps1 -Port COM4 -Listen 9100   # 起串口遥测网关: 串口 -> TCP :9100 (文本 API + RAW 透传)
+```
+
+步骤与排障见 `docs/真机链路-STM32到上位机.md`。注意 COM 口独占，两个脚本会先释放端口再启动（该互斥的成因与消解方案登记在 `docs/网关与服务链路优化方案.md` P4）。
+
+### gRPC 服务层（在 WSL2 里构建，仅作构建沙箱）
+
+```bash
+cd /mnt/e/Work/McuProject/DeviceMonitorPlatform
+bash wsl_setup.sh            # 装 apt 版 gRPC 依赖(会 sudo) + 构建 + 合成模式冒烟自检
+bash wsl_setup.sh --build    # 只构建
+bash wsl_setup.sh --run      # 构建后前台启动 server
+bash e2e_realdevice.sh <windows_ip>   # 真机全链路: 串口 -> Windows 网关(:9100) -> WSL gRPC(:50051) -> probe
+```
+
+分步说明 `docs/WSL-gRPC-落地指南.md`；一次完整通过的真实输出 `docs/grpc-verify-log.md`。
+
+### ROS2 桥与下游验收（Ubuntu 22.04 VM + Humble）
+
+前提：VM 上已 `source /opt/ros/humble/setup.bash`，且已装 `ros-humble-diagnostic-aggregator`（下游联动 [6] 格要用）。远端地址**不写死也不猜测**，走环境变量：
+
+```powershell
+# Windows 侧一条链: git bundle -> scp -> 远端同步构建 -> 跑指定脚本 -> 原始读数 scp 取回落文件
+$env:DMP_VM_IP='<VM 地址>'; $env:DMP_VM_USER='<用户名>'
+.\tools\diagnostics\run_vm_rounds.ps1 -RepoScript tools/vm_e2e.sh                # 全链路冒烟
+.\tools\diagnostics\run_vm_rounds.ps1 -RepoScript tools/vm_lifecycle_compose.sh  # 生命周期 + 长回调毒化
+.\tools\diagnostics\run_vm_rounds.ps1 -RepoScript tools/vm_downstream_bag.sh     # rosbag2 + diagnostic_aggregator
+```
+
+想手动分步（或直接进 VM）：
+
+```bash
+git bundle create ../build_tmp/dmp.bundle main        # Windows 侧打包
+scp ../build_tmp/dmp.bundle <user>@<vm>:~/
+bash tools/vm_native_build.sh      # Linux 原生构建 + ctest
+bash tools/vm_ros2_build.sh        # colcon 构建 dmp_msgs / dmp_ros2_bridge + colcon test
+bash tools/vm_e2e.sh               # simulator -> gateway_service -> 桥 -> ROS2 话题/服务
+bash tools/vm_qos_mismatch.sh      # QoS 错配四格矩阵取证
+POISON=1 bash tools/vm_lifecycle_compose.sh   # 整轮 25 条（POISON=0 快档 16 条）
+bash tools/vm_downstream_bag.sh    # 下游联动 22 条（rosbag2 录/取/回放 + 聚合器 + 告警传播）
+bash tools/vm_realdevice_e2e.sh <windows_ip> 9100 bed01   # 跨机真板: STM32->Windows 网关->VM 内 ROS2
+```
+
+接口契约与实测记录在 `ros2/README.md`；取证工具与每份原始读数的对应关系在 `tools/diagnostics/README.md`。
+
+### 运维诊断 Agent
+
+```powershell
+python tools/dmp_agent.py "3号通道为何频繁告警?" --collect 10   # 离线确定性归因(无密钥、结果可复现)
+# --llm 模式: OpenAI 兼容 /chat/completions + function calling, base_url/model/key 全走环境变量
+```
+
+它把网关的 `STATS`/`ALARMS`/`HISTORY` 封装成工具；`HISTORY [ch] [秒]` 是网关为归因专门加的逐通道窗口聚合命令。详见 `docs/运维Agent-诊断指南.md`。
+
+### 附录：不用 CMake，直接 g++ 单文件验证
+
+```bash
+g++ -std=c++17 -pthread -Iinclude tests/test_protocol.cpp -o test_protocol && ./test_protocol
+g++ -std=c++17 -Iinclude tests/test_storage.cpp -o test_storage && ./test_storage
+g++ -std=c++17 -Iinclude src/device_simulator.cpp -lws2_32 -o device_simulator
+g++ -std=c++17 -Iinclude src/monitor_console.cpp -lws2_32 -o monitor_console
+g++ -std=c++17 -Iinclude src/monitor_serial.cpp -o monitor_serial   # 裸串口接真实 STM32
+g++ -std=c++17 -Iinclude -Ifirmware tests/test_frame_parity.cpp firmware/dmp_frame_core.c -o test_frame_parity && ./test_frame_parity
+# 终端A ./device_simulator 9000 ; 终端B ./monitor_console 127.0.0.1 9000 out.csv   (第3个参数为导出 CSV)
+```
+
+亦可 `cmake -S . -B build && cmake --build build`（Qt 上位机加 `-DDMP_BUILD_QT=ON`）。
 
 ## 落地路线（对应 8 周计划 W3-5）
 
@@ -156,31 +307,4 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 
 > ⚠️ 运行时冒烟：本代理会话为**非交互沙箱**，跑 GUI 子系统 Qt 程序会在按需加载 platform/QSQLITE 插件时触发 `STATUS_DLL_INIT_FAILED (0xC0000142)`，属环境限制而非代码缺陷。请在**用户桌面（交互会话）**执行 `build_qt\qt_monitor.exe --verify`（应打印 `... -> PASS`）或双击运行看实时曲线。
 
-> 本地直编验证（MinGW g++，无需 Qt）：
-> ```bash
-> g++ -std=c++17 -pthread -Iinclude tests/test_protocol.cpp -o test_protocol && ./test_protocol
-> g++ -std=c++17 -Iinclude tests/test_storage.cpp -o test_storage && ./test_storage
-> g++ -std=c++17 -Iinclude src/device_simulator.cpp -lws2_32 -o device_simulator
-> g++ -std=c++17 -Iinclude src/monitor_console.cpp -lws2_32 -o monitor_console
-> g++ -std=c++17 -Iinclude src/monitor_serial.cpp -o monitor_serial   # 裸串口接真实 STM32
-> g++ -std=c++17 -Iinclude -Ifirmware tests/test_frame_parity.cpp firmware/dmp_frame_core.c -o test_frame_parity && ./test_frame_parity
-> # 终端A ./device_simulator 9000 ; 终端B ./monitor_console 127.0.0.1 9000 out.csv   (第3个参数为导出 CSV)
-> ```
-> 亦可 `cmake -S . -B build && cmake --build build`（Qt 上位机加 `-DDMP_BUILD_QT=ON`）。
-
-## 面试可讲点
-
-- 帧同步与粘包拆包、CRC 校验、超时重传 → 设备通信链路健壮性
-- 无锁环形缓冲 + 采集/UI 线程分离 → 高并发数据链路不丢包
-- 阈值判定与危急值告警 → 安全关键（对应医疗器械软件分级）
-- 全流程按 IEC 62304 V 模型 + ISO 14971 风险管理组织 → 法规护城河
-- ROS2 桥的双层接口（保真 topic + 标准诊断视图）与写路径安全边界 → “能写什么”比“能写多方便”先想清楚
-- QoS 不匹配是 ROS2 里唯一“发现得到、不报错、就是没数据”的故障类 → 用四格实测矩阵拿结论，而不是背文档
-- `select()` nfds 语义差异导致“连接正常、零字节” → 跨平台移植时现象离根因有多远
-- `--verify` 拿 `COUNT(*)` 绝对值做断言 → **自检脚本自己不可重跑**比没自检更坑
-- CI 的 exit 1 并不等于“自检判 FAIL”：先用公开 API 拿到逐步结论，发现失败在**构建阶段**，后两步 skipped → **先定住“挂在哪一步”，再谈根因**；日志不可读就把根因 grep 成匿名可读的注解
-- 本地“全选”装了全部 Qt 模块，CI 的 `modules:` 白名单少一个 → **本地永远复现不了这个差异**；依赖清单存在两个不同构的声明面本身就是 bug
-- `timeout` 默认 SIGTERM 不 flush → 被杀进程丢块缓冲，**“0 条数据”可能是取证手段自己造的假**
-- 验收的证人换成生态组件（rosbag2 录/取/回放 + `diagnostic_aggregator` 聚合）而不是自己写的订阅方 → **“我测的和我信的是同一个东西”这条要怎么破**；顺带讲一条被实测推翻的预设：rosbag2 会探测发布端 offered QoS，所以“QoS 错配一定静默”不能外推到任何下游
-- 阳性对照要**并列在被试侧与裁判侧两侧** → 补诊断栈那格第一轮四格全红，真因是我自己的探针把 rclpy 的 uint8 当 int（异常打断 spin）；“原始侧也是 0”才能把一次**红**归对类——否则“生态工具没工作”会被当成结论写进文档
-- **全绿的一格可能什么也没证** → `level 逐条一致，不一致 0` 在“链路完好”和“告警根本不传播”两种世界里给同一个读数，因为那一窗全是 OK。要让它可区分就得自己造一次非 OK：改阈值把现值推出区间，再看原始侧与聚合侧是否同时变 Error（素材录 B-52）
+> 逐文件的直编命令与端口参数见上文「操作方法 → 附录」。
