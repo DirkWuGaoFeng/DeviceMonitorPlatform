@@ -12,8 +12,10 @@
 // 未来把本文件的 recv/parse/send 换成 gRPC server (见 proto/telemetry.proto) 即可, 业务层不动。
 //
 // 运行: 先起模拟器 ./device_simulator 9000, 再起 ./gateway_service 9100 127.0.0.1 9000
-//       真机模式: ./gateway_service 9100 --serial COM4 [baud]   (上游=STM32 串口; 订阅者除文本行外
-//                 还会收到原始帧字节流 RAW, 供 WSL 侧 dmp_grpc_server 直连做全链路)
+//       真机模式: ./gateway_service 9100 --serial COM4 [baud]        (Windows; 上游=STM32 串口)
+//                 ./gateway_service 9100 --serial /dev/ttyACM0 [baud] (Linux/S2: termios raw; 端口只认
+//                 /dev/tty{ACM,USB,S}*，不做 COMx 伪映射; 需 dialout 组或 /dev/serial/by-id 固定别名)
+//                 订阅者除文本行外还会收到原始帧字节流 RAW, 供 WSL 侧 dmp_grpc_server 直连做全链路
 // 自测: telnet/nc 127.0.0.1 9100  然后输入 STATS / ALARMS 5 / SUBSCRIBE / CLIENTS / HELP
 //
 // 日志约定: 只走 stdout。重定向到文件时 CRT 默认全缓冲(Windows 尤其如此，且它的 _IOLBF
@@ -52,6 +54,7 @@ namespace obq = dmp::obq;   // 出向队列的类型前缀（命令词 K 已被 
   #include <unistd.h>
   #include <fcntl.h>       // fcntl / O_NONBLOCK (下游转非阻塞)
   #include <sys/select.h>
+  #include <termios.h>     // S2: tcgetattr/tcsetattr/cfmakeraw (串口上游 termios)
   using sock_t = int;
   #define CLOSESOCK ::close
   #define INVALID_SOCKET (-1)
@@ -192,6 +195,72 @@ static bool openSerial(const std::string& port, int baud) {
     g_ser = h;
     return true;
 }
+// 统一读出口（与 POSIX 侧同签名，主循环因此不再带平台宏）：>0 = 读到字节数；
+// 0 = 本轮无数据（COMMTIMEOUTS 已让 ReadFile 有界返回）；<0 = 设备真出错。
+// ReadFile 失败在这里也归为 0（**保持原 Windows 行为**：旧循环把失败当“本轮无数据”继续轮询）。
+static long readSerial(uint8_t* buf, size_t cap) {
+    DWORD nr = 0;
+    if (!::ReadFile(g_ser, buf, static_cast<DWORD>(cap), &nr, nullptr)) return 0;
+    return static_cast<long>(nr);
+}
+#else
+// ---- 串口上游 (S2 / SR-016: termios raw + 非阻塞; 与 Windows 腿同一 20ms 轮询节拍) ----
+static int g_ser = -1;                        // 串口上游 fd (仅 POSIX)
+// POSIX 端口识别：只承认设备节点本身，识别 /dev/tty{ACM,USB,S}*。
+// **不做** COM4→/dev/ttyS3 这类伪映射——那是把 Windows 命名习惯当成 Linux 事实，会指错设备。
+// 允许传绝对路径 /dev/.. 或 tty 短名（ttyACM0/ttyUSB0/ttyS0）；COMx 一律拒绝并让调用方打印实情。
+static bool normalizePort(const std::string& in, std::string& out) {
+    if (in.rfind("/dev/", 0) == 0) { out = in; return true; }
+    if (in.rfind("tty", 0) == 0)    { out = "/dev/" + in; return true; }
+    return false;                             // COMx 或其他：不猜，交调用方报错
+}
+static bool baudToSpeed(int baud, speed_t& out) {
+    switch (baud) {
+        case 9600:   out = B9600;   return true;
+        case 19200:  out = B19200;  return true;
+        case 38400:  out = B38400;  return true;
+        case 57600:  out = B57600;  return true;
+        case 115200: out = B115200; return true;
+        case 230400: out = B230400; return true;
+        default:     return false;            // 不支持的波特率：宁可拒开，也不静默降到 115200
+    }
+}
+static bool openSerial(const std::string& port, int baud) {
+    std::string np;
+    if (!normalizePort(port, np)) {
+        std::fprintf(stderr, "[gateway] POSIX 不识别端口 '%s'（给 /dev/ttyACM0、/dev/ttyUSB0 或 ttyS*；不做 COMx 伪映射）\n", port.c_str());
+        return false;
+    }
+    speed_t sp;
+    if (!baudToSpeed(baud, sp)) {
+        std::fprintf(stderr, "[gateway] 不支持的波特率 %d（9600/19200/38400/57600/115200/230400）\n", baud);
+        return false;
+    }
+    int fd = ::open(np.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) { std::fprintf(stderr, "[gateway] open(%s) 失败: %s\n", np.c_str(), std::strerror(errno)); return false; }
+    struct termios tio{};
+    if (::tcgetattr(fd, &tio) != 0) { std::fprintf(stderr, "[gateway] tcgetattr(%s) 失败: %s\n", np.c_str(), std::strerror(errno)); ::close(fd); return false; }
+    ::cfmakeraw(&tio);                        // 8N1 无回显/无信号处理/原样字节（等价 Windows 的 fBinary raw）
+    ::cfsetispeed(&tio, sp); ::cfsetospeed(&tio, sp);
+    tio.c_cflag |= (CREAD | CLOCAL);          // 使能接收 + 忽略调制解调器控制线（无 carrier 也能读）
+    // O_NONBLOCK 已使 read 不阻塞，VMIN/VTIME 在此退居其次；显式置 0/0 与方案 S2 里
+    // “无数据成为可读事件而非挂死”一致（方案字面的 VTIME=1 在带 O_NONBLOCK 时不生效）。
+    tio.c_cc[VMIN]  = 0;
+    tio.c_cc[VTIME] = 0;
+    if (::tcsetattr(fd, TCSANOW, &tio) != 0) { std::fprintf(stderr, "[gateway] tcsetattr(%s) 失败: %s\n", np.c_str(), std::strerror(errno)); ::close(fd); return false; }
+    int fl = ::fcntl(fd, F_GETFL, 0);          // 重设非阻塞：某些平台 tcsetattr 会剥掉 O_NONBLOCK，不依赖它仍在
+    if (fl >= 0) ::fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    ::tcflush(fd, TCIFLUSH);
+    g_ser = fd;
+    return true;
+}
+// 统一读出口（与 Windows 侧同签名）：>0 读到字节数；0 本轮无数据；<0 设备真错。
+static long readSerial(uint8_t* buf, size_t cap) {
+    ssize_t n = ::read(g_ser, buf, cap);
+    if (n > 0) return static_cast<long>(n);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;  // 非阻塞空读：不是错误
+    return (n == 0) ? 0 : -1;                 // read 返 0 对 tty 无特殊含义；<0 且非 EAGAIN 才当设备已拔
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -240,8 +309,11 @@ int main(int argc, char** argv) {
         }
         std::printf("[gateway] 上游 = 串口 %s @ %d (真机模式)\n", serPort.c_str(), serBaud);
 #else
-        std::fprintf(stderr, "[gateway] --serial 仅支持 Windows 侧\n");
-        return 2;
+        if (!openSerial(serPort, serBaud)) {
+            std::fprintf(stderr, "[gateway] 打开串口 %s 失败 (不存在/权限? 试 `sudo usermod -aG dialout $USER` 后用 /dev/serial/by-id/ 固定别名)\n", serPort.c_str());
+            return 2;
+        }
+        std::printf("[gateway] 上游 = 串口 %s @ %d (真机模式, termios raw+非阻塞)\n", serPort.c_str(), serBaud);
 #endif
     } else {
         // 上游: 连接设备数据源 (TCP)
@@ -319,18 +391,20 @@ int main(int argc, char** argv) {
 
         // 上游来数据: 解码 -> drain -> 广播给订阅者 (文本行或 RAW 字节透传)
         if (serialUp) {
-#ifdef _WIN32
+            // 串口上游现在两端都经 readSerial() 统一进入（Windows ReadFile / POSIX termios read），
+            // 主循环不再带平台宏；无数据当轮返回 0 继续轮询，与 select 的 20ms 节拍一致。
             uint8_t buf[4096];
-            DWORD nr = 0;
-            if (ReadFile(g_ser, buf, sizeof(buf), &nr, nullptr) && nr > 0) {
-                onUpstreamBytes(buf, nr);
+            long nr = readSerial(buf, sizeof(buf));
+            if (nr > 0) {
+                onUpstreamBytes(buf, static_cast<size_t>(nr));
                 // RAW 也走队列（出向只有这一个出口）。该队列开了 keepStreamIntact：
                 // 宁可踢除也不在帧中间丢一块（方案 T1.1 定案 B-2）——下游桥有重连能力，
                 // 被踢会从整帧重新对齐；而一个静默的洞只会把 crc_err 顶成尖峰、污染归因。
                 for (auto& c : clients)
-                    if (c.raw) enqueue(c, std::string(reinterpret_cast<char*>(buf), nr), obq::Kind::Sample);
+                    if (c.raw) enqueue(c, std::string(reinterpret_cast<char*>(buf), static_cast<size_t>(nr)), obq::Kind::Sample);
+            } else if (nr < 0) {
+                std::printf("[gateway] 上游串口读失败, 退出\n"); std::fflush(stdout); break;
             }
-#endif
         } else if (FD_ISSET(up, &rf)) {
             uint8_t buf[4096];
             int n = ::recv(up, reinterpret_cast<char*>(buf), sizeof(buf), 0);

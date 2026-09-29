@@ -73,6 +73,26 @@ bash e2e_realdevice.sh 172.22.176.1     # IP=WSL 默认网关(即 Windows 宿主
 
 关键设计：网关新增 `RAW` 命令（已进 `service_proto.h` 协议层+单测）——订阅者收到与上游逐字节相同的原始帧流，gRPC 服务把串口字节喂给自己的 `FrameDecoder`，**同一帧协议贯穿 UART/TCP/gRPC 三段传输**。WSL 连 Windows 用默认网关 IP（`ip route | awk '/default/{print $3}'`），网关 bind INADDR_ANY 无需改防火墙。
 
+### 阶段三·Linux 分支：原生串口上游（S2 / termios，已实测）
+
+Linux 上 `gateway_service --serial` 不再退回“仅 Windows”，而是用 termios raw 打开设备节点作上游（对应 SR-016 的原生部署形态）：
+
+```bash
+# 原生 Ubuntu 22.04（非 WSL 运行态；WSL 仅作构建宿主）
+sudo usermod -aG dialout $USER      # 串口节点属 dialout 组；改组后需重新登录生效
+./gateway_service 9100 --serial /dev/ttyACM0 115200
+```
+
+- **端口识别**：只认设备节点本身——`/dev/ttyACM0`、`/dev/ttyUSB0`、`/dev/ttyS*`，也接受 `ttyACM0` 短名（自动补 `/dev/`）。**不做** `COM4→/dev/ttyS3` 伪映射：传 `COM4` 会被明确拒开（“打开了错误的设备”比“打不开”更难查）。
+- **termios 配置**：`O_RDWR|O_NOCTTY|O_NONBLOCK` + `cfmakeraw` + `CLOCAL|CREAD`；非阻塞 + 主循环 20ms 轮询（与 Windows 腿同节拍），“无数据”当轮返回 0 继续轮询而非挂死。仅接受 9600/19200/38400/57600/115200/230400，其它波特率**拒开不静默降级**。
+- **udev 固定别名（防热插拔节点漂移）**：CH340/CP210x 重插后 `/dev/ttyUSB*` 编号会变，用按序列号钉的稳定链接：
+  ```
+  # /etc/udev/rules.d/99-dmp-serial.rules
+  SUBSYSTEM=="tty", ATTRS{serial}=="<板子序列号>", SYMLINK+="dmp_stm32"
+  ```
+  之后 `--serial /dev/dmp_stm32`（或直接 `/dev/serial/by-id/usb-...`），重启/换 USB 口都不漂移。
+- **实测（pty 虚拟串口，`tools/diagnostics/s2_serial_pty.py`，本机 Linux）**：G1 `COM4` 拒开 rc=2；G2 非法波特率 `12345` 拒开 rc=2；G3 起网关连得上（连得上即证明 `openSerial` 已进到 listen）+ RAW 订阅握手 + 往 pty master 灌 50 段可辨识字节、RAW 侧收到 **50 段完整副本（1450 字节）**——tty→readSerial→RAW 透传整条路真走通。5/5 PASS。
+
 ---
 
 ## 阶段四：换成真实传感器（可选）
