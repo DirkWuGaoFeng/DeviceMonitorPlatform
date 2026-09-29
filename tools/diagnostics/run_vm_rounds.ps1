@@ -103,8 +103,8 @@ try {
     }
 
     $out = $OutFile
+    $tag = if ($RoundScript) { $RoundScript -replace '\.sh$', '' } else { Split-Path -Leaf (($RepoScript -replace '\.sh$', '')) }
     if (-not $out) {
-        $tag = if ($RoundScript) { $RoundScript -replace '\.sh$', '' } else { Split-Path -Leaf ($RepoScript -replace '\.sh$', '') }
         $out = Join-Path $env:TEMP ("vmrounds_{0}_{1}.txt" -f $tag, (Get-Date -Format 'yyyyMMdd_HHmmss'))
     }
     Write-Host "[5/6] 跑, 原始输出落盘 -> $out"
@@ -117,13 +117,28 @@ try {
         $envs = ($RemoteEnv | ForEach-Object { "export $_" }) -join '; '
         $remoteCmd = "$envs; $remoteCmd"
     }
-    Write-Host "       remote: $remoteCmd"
-    ssh -o ServerAliveInterval=30 "${VmUser}@${VmHost}" $remoteCmd 2>&1 | Tee-Object -FilePath $out | Out-Null
+    # 为什么不是 `ssh ... | Tee-Object $out`: 本机 diagnostics/README 就写着别用 Tee ——
+    # ssh 的字节流经 PowerShell 按控制台编码二次解码, 中文全成乱码, 那份"原始证据"不能入库,
+    # 而脚本看起来却"成功"了。改成**远端落文件 + scp 取回**: 字节原样, CR 数为 0。
+    # 输出文件必须落在远端 $LOG 目录之外(脚本开头会 rm -rf "$LOG")。
+    $remoteOut = "/tmp/dmp_round_$tag.out"
+    # 这里用反引号转义 `$?: PowerShell 的双引号串会先把 $? 当自己的变量展开成 True/False,
+    # 于是远端拿到一句 `echo REMOTE_RC=\True` —— 一个看起像在报退出码、实则报布尔值的读数。
+    $runRemote = "$remoteCmd > $remoteOut 2>&1; echo REMOTE_RC=`$?; wc -c $remoteOut; tail -3 $remoteOut"
+    Write-Host "       remote: $remoteCmd > $remoteOut"
+    ssh -o ServerAliveInterval=30 "${VmUser}@${VmHost}" $runRemote 2>&1 | ForEach-Object { "       $_" }
     $rc = $LASTEXITCODE
 
-    Write-Host '[6/6] 结论行(由远端脚本现算, 本脚本不改写它)'
-    Get-Content $out | Where-Object { $_ -match '^(PASS=|FAIL=|\[.\] |.*结论|.*FAIL )' } | Select-Object -Last 15
-    Write-Host "  远端退出码 = $rc  (非 0 不等于结论作废: 输出末尾的 PASS=/FAIL= 才是判据)"
+    Write-Host '[6/6] scp 取回原始读数, 并打结论行(由远端脚本现算, 本脚本不改写它)'
+    scp "${VmUser}@${VmHost}:$remoteOut" $out
+    if ($LASTEXITCODE -ne 0) { Die "scp $remoteOut 失败 —— 读数没取回来, 本轮没有证据" }
+    if (-not (Test-Path $out)) { Die "取回后本地没有 $out" }
+    $raw = Get-Content $out -Raw
+    if ($raw.Length -eq 0) { Die '取回的读数是 0 字节(远端那句重定向没生效?)' }
+    $cr = ([regex]::Matches($raw, [char]13)).Count
+    Write-Host "  evidence: $out size=$($raw.Length) CR=$cr (CR 应为 0, 否则是编码问题)"
+    Get-Content $out | Where-Object { $_ -match '^  PASS=|^=== \[|PRED-OVERTURNED|FAIL |ASSERTS_PASS|SCRIPT_DONE' } | Select-Object -Last 20
+    Write-Host "  ssh 退出码 = $rc  (非 0 不等于结论作废: 输出末尾的 PASS=/FAIL= 才是判据)"
     Write-Host "RAW_LOG=$out"
 } finally {
     Pop-Location
