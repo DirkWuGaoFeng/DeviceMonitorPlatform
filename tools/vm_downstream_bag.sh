@@ -17,8 +17,10 @@
 #   2026-09-29 首跑实测 141 批: **预设被推翻**。Humble 的 rosbag2 会查发布端 offered QoS 并
 #   自建兼容订阅 —— 生态工具比我手写的订阅方聪明。新预设与证据都在[4]那一格边上写着。
 #
-# [6] diagnostic_aggregator: 本机 sudo 需要密码, apt 装不上 -> 显式 SKIP 并打出安装命令。
-#   SKIP 不是 PASS: 汇总行会把"未验证"单独说出来(素材录 B-35 —— 结论行必须从本轮数据现算)。
+# [6] diagnostic_aggregator: 让**标准诊断栈**（不是我自己写的消费者）去订阅 /diagnostics 并把
+#   结果重新发布出来。2026-09-29 之前这格一直 SKIP(本机 sudo 要密码, apt 装不上); 包装上后补成真断言。
+#   侦查过程在 tools/diagnostics/vm_aggregator_probe.sh —— 那一轮自己的读数被残留进程污染过,
+#   所以本格开头有一句"节点必须只有一个"的断言, 不是凑数, 是被这件事教过(见下面 [6] 的注释)。
 #
 # 用法(VM 内): bash tools/vm_downstream_bag.sh
 set +u
@@ -40,6 +42,12 @@ pkill -f "$PWD/build_linux/device_simulator" 2>/dev/null
 pkill -f "$PWD/build_linux/gateway_service"  2>/dev/null
 pkill -f bridge_node 2>/dev/null
 pkill -f 'ros2 bag' 2>/dev/null
+# 按名字收, 不用 $! : 上一轮侦查实测 `kill $PID` 只杀掉了 `ros2 run` 的外壳,
+# aggregator_node / example_pub.py 子进程照旧活着, 于是下一个阶段的读数里混着上一个阶段的
+# 发布物(具体到这里: /diagnostics_agg 被 example 的 /Aggregation/* 占满)。素材录 B-40 跨轮污染
+# 的**同族**, 只是这次发生在同一个脚本的两个阶段之间, 不是两轮之间。
+pkill -f aggregator_node 2>/dev/null
+pkill -f example_pub.py 2>/dev/null
 sleep 1
 PASS=0; FAIL=0; SKIP=0; PRED_FAIL=0
 chk() {  # chk <说明> <实际> <期望>
@@ -108,6 +116,71 @@ print('batches_seen=%d frames=%d first_seq=%s last_seq=%s' % (
     seen[0], len(rows),
     rows[0][1] if rows else '-', rows[-1][1] if rows else '-'))
 PY
+}
+
+# 两侧**同窗**抓: 原始 /diagnostics 与聚合 /diagnostics_agg。分两个窗口抓就变成"比两个时刻的诊断栈",
+# 那条"聚合前后 level 一致"的断言当场就没有意义了。
+agg_dump() {  # agg_dump <输出csv> <秒>
+  timeout -s INT $(($2 + 6)) python3 - "$1" "$2" > "$1.meta" 2>"$1.err" <<'PY'
+import csv, sys, time
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from diagnostic_msgs.msg import DiagnosticArray
+out, dur = sys.argv[1], float(sys.argv[2])
+rows = []
+def mk(tag):
+    def cb(m):
+        for s in m.status:
+            rows.append((tag, s.name, int(s.level), s.hardware_id, s.message))
+    return cb
+rclpy.init(); n = Node('dmp_agg_probe')
+qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+n.create_subscription(DiagnosticArray, '/diagnostics',     mk('raw'), qos)
+n.create_subscription(DiagnosticArray, '/diagnostics_agg', mk('agg'), qos)
+t0 = time.monotonic()
+while time.monotonic() - t0 < dur:
+    rclpy.spin_once(n, timeout_sec=0.05)
+with open(out, 'w', newline='') as fp:
+    csv.writer(fp).writerows(rows)
+print('raw_status=%d agg_status=%d raw_uniq=%d agg_uniq=%d' % (
+    sum(1 for r in rows if r[0] == 'raw'), sum(1 for r in rows if r[0] == 'agg'),
+    len(set(r[1] for r in rows if r[0] == 'raw')), len(set(r[1] for r in rows if r[0] == 'agg'))))
+PY
+}
+
+# 把一份 csv 只读**一次**, 一次吐出全部 KEY=VAL。先前想过按断言条数各跑一遍 python:
+# 那不只慢, 还让每条断言各自解析一次 -> 一处解析写错, 几格红的不是链路而是脚本自己。
+agg_judge() {  # agg_judge <csv> -> 一行 KEY=VAL ...
+  python3 - "$1" <<'PY'
+import csv, re, sys
+rows = [r for r in csv.reader(open(sys.argv[1])) if r and len(r) == 5]
+raw, agg = {}, {}
+for tag, name, level, hw, _msg in rows:
+    (raw if tag == 'raw' else agg)[name] = (level, hw)   # 同窗内反复发布, 留最后一次读数
+# 聚合后的条目名形如 /DMP/Link/ telemetry_link(analyzer 的 path 在前, 条目名原样拼在后) ——
+# 这个形状是 2026-09-29 侦查轮从厂商 example 的 /Aggregation/Arms/ arms left motor 上看到的,
+# 不是猜的; 所以这里用"以原始 name 结尾"去认, 而不是要它全字等于。
+link = [k for k in agg if k.endswith('telemetry_link')]
+chan = [k for k in agg if re.search(r'_ch\d+$', k)]
+cmped = [(r, a) for r, (lv, _h) in raw.items() for a in agg if a.endswith(r)]
+mism  = [(r, a) for r, (lv, _h) in raw.items() for a in agg
+         if a.endswith(r) and agg[a][0] != lv]
+hwkeep = sum(1 for _r, _v in raw.items()
+             for a in agg if a.endswith(_r) and agg[a][1] != '')
+print('RAW_N=%d AGG_N=%d LINK_IN=%d CH_IN=%d CMP=%d MISMATCH=%d HW_KEEP=%d' % (
+    len(raw), len(agg), len(link), len(chan), len(cmped), len(mism), hwkeep))
+print('AGG_SAMPLE=%s' % ('|'.join(sorted(agg)[:4]) or '-'), file=sys.stderr)
+PY
+}
+# 收不到东西时回 0 而不是回空: 空串会让下面的 `python3 -c "print(1 if  > 0 ...)"` 直接语法错,
+# 于是一格红看起来像"脚本坏了"而不是"链路没数据" —— 读数缺失要能诊断, 不能变成另一种噪声。
+g() { local v; v=$(echo "$1" | tr ' ' '\n' | grep -m1 "^$2=" | cut -d= -f2); echo "${v:-0}"; }
+
+chk_pred_agg() {  # chk_pred_agg <说明> <实测> <预设> —— 与 [4] 同一纪律: 预设没中是新事实, 不是缺陷
+  if [ "$2" = "$3" ]; then echo "  PASS(预设命中) $1 (=$2)"; PASS=$((PASS+1));
+  else echo "  PRED-OVERTURNED $1: 预设=$3 实测=$2 —— 新事实, 要改的是文档和认知, 不是断言"
+       PRED_FAIL=$((PRED_FAIL+1)); fi
 }
 
 echo "=== [0] simulator + gateway + 桥(autostart 走完 configure->activate) ==="
@@ -180,6 +253,55 @@ BAGF=$(cut -d, -f2 "$LOG/bag.csv" 2>/dev/null | wc -l)
 echo "  实时侧 $LIVE_N 帧 / bag 内 $BAGF 帧"
 chk "bag 完整包含了实时侧每一帧且六字段逐字相同" "$(win_cmp "$LOG/live.csv" "$LOG/bag.csv" live-vs-bag)" "1"
 
+echo "=== [6] diagnostic_aggregator: 让标准诊断栈聚合我们的 /diagnostics ==="
+# 为什么放在 [3] 之后、[4b] 之前: /diagnostics 只在桥 active 时流, 而 [4b] 为了回放静音会把桥
+# deactivate。顺序写错的话这格收到的永远是超时项 —— 那不是链路红, 是脚本自己造成的假红。
+# 参数文件的形状照搬厂商 example(顶层键就是 `analyzers`, 实测 ros2 node list 得到的节点名正是 /analyzers):
+#   /opt/ros/humble/share/diagnostic_aggregator/example_analyzers.yaml
+# 聚合输出话题 /diagnostics_agg, 顶层汇总 /diagnostics_toplevel_state —— 两个都是侦查轮量出来的。
+cat > "$LOG/agg.yaml" <<'YAML'
+analyzers:
+  ros__parameters:
+    path: DMP
+    link:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Link
+      startswith: ['telemetry']
+      timeout: 5.0
+    channels:
+      type: diagnostic_aggregator/GenericAnalyzer
+      path: Channels
+      contains: ['_ch']
+      timeout: 5.0
+YAML
+nohup ros2 run diagnostic_aggregator aggregator_node --ros-args \
+      --params-file "$LOG/agg.yaml" > "$LOG/agg.log" 2>&1 & AGG=$!
+sleep 6
+# 先问"谁在答"再问"答得对不对": 侦查轮就是在这里吃过亏 —— 上一个阶段的聚合器没死干净,
+# 两个节点同名 /analyzers 、都发 /diagnostics_agg, 而 echo 拿到的全是对方那份。
+chk "图上只有**一个**聚合器节点(多个同名单元 = 读数出处说不清)" \
+    "$(timeout 20 ros2 node list 2>/dev/null | grep -c '^/analyzers$')" "1"
+chk "诊断栈的顶层汇总话题在(外部监控就看这一个)" \
+    "$(timeout 20 ros2 topic list 2>/dev/null | grep -c '^/diagnostics_toplevel_state$')" "1"
+agg_dump "$LOG/agg_both.csv" 10
+KV=$(agg_judge "$LOG/agg_both.csv" 2>"$LOG/agg_sample.txt")
+echo "  读数: $KV"
+echo "  探针侧: $(cat "$LOG/agg_both.csv.meta" 2>/dev/null | tr '\n' '|') err尾行: $(tail -1 "$LOG/agg_both.csv.err" 2>/dev/null)"
+echo "  聚合项样例: $(cut -d= -f2- "$LOG/agg_sample.txt" 2>/dev/null | head -1)"
+chk "阳性对照: 同窗两侧都收到了东西 (原始 $(g "$KV" RAW_N) 项 / 聚合 $(g "$KV" AGG_N) 项)" \
+    "$(python3 -c "print(1 if $(g "$KV" RAW_N) > 0 and $(g "$KV" AGG_N) > 0 else 0)")" "1"
+chk "我们的 telemetry_link 进了聚合结果 ($(g "$KV" LINK_IN) 项)" \
+    "$(python3 -c "print(1 if $(g "$KV" LINK_IN) > 0 else 0)")" "1"
+chk "通道项 *_chN 进了聚合结果 ($(g "$KV" CH_IN) 项)" \
+    "$(python3 -c "print(1 if $(g "$KV" CH_IN) > 0 else 0)")" "1"
+# 这条不写进文件头当预设: 它就是普通断言。聚合器如果改了我们的 level, 那是它把链路判错了,
+# 不是"我预先没料到" —— 医疗语境下这正是最该红的一格。
+chk "聚合前后同名项 level 逐条一致 (比了 $(g "$KV" CMP) 条, 不一致 $(g "$KV" MISMATCH) 条)" \
+    "$(python3 -c "print(1 if $(g "$KV" CMP) >= 1 and $(g "$KV" MISMATCH) == 0 else 0)")" "1"
+HW_EXPECT="${HW_EXPECT:-1}"   # 1=聚合项应当保留我们的 hardware_id=bed01
+chk_pred_agg "预设: 聚合不丢 hardware_id(多台设备共用一个聚合器时靠它分辨)" \
+    "$(python3 -c "print(1 if $(g "$KV" HW_KEEP) > 0 else 0)")" "$HW_EXPECT"
+
 echo "=== [4b] 回放前先把实时流关静默(不然 play.csv 的出处说不清) ==="
 # 首跑这里 FAIL 过: `kill -INT $LAUNCH` + sleep 4 后探针仍收到 64 帧。
 # 不猜原因, 分成两件事量: (i) 静音用生命周期门禁 —— on_deactivate 停定时器就是为此设计的,
@@ -206,29 +328,21 @@ chk "阳性对照: 回放侧真收到了东西 ($PLAYF 帧)" \
 chk "回放出来的每一帧都能回到 bag 里逐字段相同" "$(win_cmp "$LOG/play.csv" "$LOG/bag.csv" play-vs-bag)" "1"
 echo "  回放侧 $PLAYF 帧; play 日志尾部: $(grep -o 'duration:[^ ]*' "$LOG/play.log" 2>/dev/null | head -1)"
 
-echo "=== [6] diagnostic_aggregator(标准诊断栈聚合) ==="
-if ros2 pkg prefix diagnostic_aggregator >/dev/null 2>&1; then
-  echo "  包在, 本格待补(本轮未实现聚合断言, 不冒充)"
-  SKIP=$((SKIP+1))
-else
-  echo "  SKIP: 本机无 ros-humble-diagnostic-aggregator 且 sudo 需要密码, 装不了。"
-  echo "  要跑这格请先在 VM 上: sudo apt install ros-humble-diagnostic-aggregator"
-  echo "  (apt-cache 有候选版本, 说明只是没装, 不是源里没有)"
-  SKIP=$((SKIP+1))
-fi
-
 echo "=== [9b] 收尾读数: 别把进程留给下一轮 ==="
 # 为什么不是只靠 kill -INT: 上一轮实测 launch 收到 SIGINT 后 15s 都没退。脚本开头那句
 # pkill -f bridge_node 只能杀掉节点本体, launch 自己的 python 进程会一轮一轮堆下去 ——
 # 残留进程就是 B-40 那一类跨轮污染。这里按**名字**收, 并量一个"收完还在几个"的读数;
 # 模式串不会匹到自己(本脚本叫 vm_downstream_bag.sh, 素材录 B-08)。
 kill $GW $SIM 2>/dev/null
+kill $AGG 2>/dev/null          # 只 kill 外壳不够, 下面还按名字收一道
+pkill -f aggregator_node 2>/dev/null
 pkill -f dmp_bridge.launch.py 2>/dev/null; pkill -f bridge_node 2>/dev/null
 sleep 2
 LEFT=$(pgrep -f 'bridge_node|dmp_bridge.launch.py' | wc -l)
 LEFT2=$(pgrep -f 'build_linux/(device_simulator|gateway_service)' | wc -l)
-echo "  读数: 桥相关进程仍在 $LEFT 个; sim/gateway 仍在 $LEFT2 个 (两边都应当 0)"
-chk "收尾收干净了(不给下一轮埋跨轮污染)" "$(python3 -c "print(1 if ${LEFT:-0}==0 and ${LEFT2:-0}==0 else 0)")" "1"
+LEFT3=$(pgrep -f 'aggregator_node' | wc -l)
+echo "  读数: 桥相关进程仍在 $LEFT 个; sim/gateway 仍在 $LEFT2 个; 聚合器仍在 $LEFT3 个 (三者都应当 0)"
+chk "收尾收干净了(不给下一轮埋跨轮污染)" "$(python3 -c "print(1 if ${LEFT:-0}==0 and ${LEFT2:-0}==0 and ${LEFT3:-0}==0 else 0)")" "1"
 
 echo "=== [9] 汇总 ==="
 echo "  PASS=$PASS FAIL=$FAIL SKIP=$SKIP PRED_OVERTURNED=$PRED_FAIL"
@@ -239,6 +353,7 @@ if [ "$FAIL" = 0 ] && [ "$PASS" -gt 0 ]; then
 fi
 echo SCRIPT_DONE
 
-# 收尾: 进程已在 [9b] 按名字收并量过读数; 这里只对 sim/gateway 再补一刀(幂等)。
-kill $GW $SIM 2>/dev/null
+# 收尾: 进程已在 [9b] 按名字收并量过读数; 这里只对 sim/gateway/聚合器再补一刀(幂等)。
+kill $GW $SIM $AGG 2>/dev/null
+pkill -f aggregator_node 2>/dev/null
 exit 0
