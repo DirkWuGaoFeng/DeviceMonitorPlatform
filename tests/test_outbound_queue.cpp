@@ -185,6 +185,31 @@ static void test_counters_monotonic() {
     CHECK(q.bytesBalanced());
 }
 
+static void test_stream_intact() {
+    SECTION("字节流完整性（RAW 开 keepStreamIntact）：不挤位，装不下只报 kickNeeded");
+    OutboundQueue q(smallP(100, 80, 20));
+    q.requireStreamIntact(true);
+    CHECK(q.streamIntact());
+    CHECK(q.push(lineN('A', 40), Kind::Sample));
+    CHECK(q.push(lineN('B', 40), Kind::Sample));      // 80 <= 100，未碰上限
+    CHECK(q.counters().kickNeeded == 0);              // 没撞上限时开关不该改变任何行为
+    CHECK(!q.push(lineN('C', 40), Kind::Sample));     // 需要腾位 —— 但它不挤
+    CHECK(q.counters().kickNeeded == 1);
+    // 一块都没丢：开关的语义就是“要么原样留着，要么整条重连”，中间缺一块总是不可接受
+    CHECK(q.counters().evictLines == 0 && q.counters().dropLines == 0);
+    CHECK(q.bytes() == 80 && q.peek(1)[0] == 'A');    // 原样未动（被拒的是新到的那块，不是队里的一块）
+    // 整块比上限还大：文本行那里是“静默拒收”，对字节流而言是必定的洞 → 也要报踢除
+    CHECK(!q.push(lineN('L', 101), Kind::Sample));
+    CHECK(q.counters().kickNeeded == 2);
+    CHECK(q.counters().dropLines == 1 && q.counters().evictLines == 0);
+    CHECK(q.bytesBalanced());                         // 80 = 80(在队) + 0 + 0
+    // 关掉开关后回到文本行语义：同级样本可以互相挤
+    q.requireStreamIntact(false);
+    CHECK(q.push(lineN('D', 40), Kind::Sample));
+    CHECK(q.counters().evictLines == 1 && q.bytes() == 80);
+    CHECK(q.bytesBalanced());                         // 120 = 80 + 40(evict) + 0(sent)
+}
+
 int main() {
     test_basics();
     test_bounded_evicts_oldest_same_kind();
@@ -193,6 +218,7 @@ int main() {
     test_water_hysteresis();
     test_overlong_line();
     test_counters_monotonic();
+    test_stream_intact();
     std::printf("OUTBOUND-QUEUE: run=%d fail=%d -> %s\n",
                 g_run, g_fail, g_fail == 0 ? "ALL PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;

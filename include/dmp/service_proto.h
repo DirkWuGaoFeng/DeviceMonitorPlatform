@@ -15,6 +15,7 @@
 //   RULES                       -> 逐条 RULE type=.. name=.. low=.. high=.. msg=..   (配置回读)
 //   RULE <type> <low> <high> [msg] -> RULE_ACK accepted=1 ..  幂等下发同类型覆盖
 //                                  (type 可数字 1..5 或名字 TEMP/HR/SPO2/CONC/PRESS)
+//   CLIENTS                     -> 逐条 CLIENT id=.. sub=.. raw=.. qbytes=.. ..  (每连接出向队列体检)
 //   未知                        -> ERR unknown command: X
 // 所有应答以 '\n' 结尾, 便于客户端按行读取。
 #pragma once
@@ -30,7 +31,7 @@
 namespace dmp {
 namespace svc {
 
-enum class CmdKind { Help, Stats, Alarms, Subscribe, Raw, History, Rules, SetRule, Unknown };
+enum class CmdKind { Help, Stats, Alarms, Subscribe, Raw, History, Rules, SetRule, Clients, Unknown };
 
 struct Command {
     CmdKind kind = CmdKind::Unknown;
@@ -80,6 +81,7 @@ inline Command parseCommand(const std::string& line) {
                                     ss >> c.arg; if (c.arg < -1) c.arg = -1;
                                     ss >> c.arg2; if (c.arg2 <= 0) c.arg2 = 60; }
     else if (word == "rules")     c.kind = CmdKind::Rules;
+    else if (word == "clients")    c.kind = CmdKind::Clients;
     else if (word == "rule") {
         c.kind = CmdKind::SetRule;
         std::string tv;
@@ -134,7 +136,37 @@ inline std::string formatAlarm(const AlarmEvent& a) {
 
 inline std::string formatError(const std::string& msg) { return "ERR " + msg + "\n"; }
 inline std::string formatHelp() {
-    return "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] rules rule[type][low][high][msg] help\n";
+    return "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] rules rule[type][low][high][msg] clients help\n";
+}
+
+// 每连接出向队列的自述行 (T1.1 / SR-014)。
+// 为何要单独开一条命令而不往 STATS 里加字段：STATS 的行格式已被下游脚本与 Agent 正则
+// 依赖（见 tools/dmp_agent.py 的 stats()），改格式是**破接口**；新增命令只新增能力。
+// 三档丢弃分列三列 (drop 为总、evict 为其子集、kick 单独计)：只给一个总数的话，
+// “样本被挤掉”与“应答腾不出位”这两种完全不一样的故障会被读成同一件事。
+struct ClientStat {
+    uint64_t id = 0;
+    int      sub = 0, raw = 0;
+    uint64_t qbytes = 0, lines = 0, stalled = 0;
+    uint64_t enqLines = 0, sentBytes = 0, dropLines = 0, evictLines = 0, kickLines = 0;
+};
+inline std::string formatClient(const ClientStat& s) {
+    // 缓冲尺寸按**最坏情形**定：9 个字段全取 uint64 满值时实测长 257 字节，
+    // 取 256 会把最后的 kick= 截掉——下游正则读到一个被截短的数字比读不到更难查。
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "CLIENT id=%llu sub=%d raw=%d qbytes=%llu lines=%llu stalled=%llu "
+                  "enq=%llu sent=%llu drop=%llu evict=%llu kick=%llu\n",
+                  static_cast<unsigned long long>(s.id), s.sub, s.raw,
+                  static_cast<unsigned long long>(s.qbytes),
+                  static_cast<unsigned long long>(s.lines),
+                  static_cast<unsigned long long>(s.stalled),
+                  static_cast<unsigned long long>(s.enqLines),
+                  static_cast<unsigned long long>(s.sentBytes),
+                  static_cast<unsigned long long>(s.dropLines),
+                  static_cast<unsigned long long>(s.evictLines),
+                  static_cast<unsigned long long>(s.kickLines));
+    return buf;
 }
 
 // 配置回读行: 与 AlarmRule 逐字段对应, 便于下游无歧义解析

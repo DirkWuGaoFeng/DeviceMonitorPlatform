@@ -25,6 +25,8 @@ static void test_parse() {
     CHECK(parseCommand("history -3 x").arg == -1);                        // 非法回退默认
     CHECK(parseCommand("history -3 x").arg2 == 60);
     CHECK(parseCommand("  stats \r\n").kind == CmdKind::Stats);      // 去空白与 CRLF
+    CHECK(parseCommand("CLIENTS").kind == CmdKind::Clients);      // 每连接出向队列体检
+    CHECK(parseCommand("  clients \r\n").kind == CmdKind::Clients);   // 大小写不敏感 + 去空白
     CHECK(parseCommand("Help").kind == CmdKind::Help);
     CHECK(parseCommand("ALARMS 3").kind == CmdKind::Alarms);
     CHECK(parseCommand("ALARMS 3").arg == 3);
@@ -66,7 +68,26 @@ static void test_format() {
     CHECK(formatStats(5, 1, 2) == "STATS ok=5 crc_err=1 dropped=2\n");
     CHECK(formatError("bad cmd") == "ERR bad cmd\n");
     CHECK(formatHelp() == "COMMANDS subscribe raw history[ch][sec] stats alarms[limit] "
-                          "rules rule[type][low][high][msg] help\n");
+                          "rules rule[type][low][high][msg] clients help\n");
+
+    // CLIENT 行：字段顺序与名字都是下游正则的一部分，逐字节钉住
+    ClientStat cs; cs.id = 3; cs.sub = 1; cs.raw = 0; cs.qbytes = 4096; cs.lines = 58;
+    cs.stalled = 1; cs.enqLines = 1000; cs.sentBytes = 61040;
+    cs.dropLines = 100; cs.evictLines = 96; cs.kickLines = 4;
+    CHECK(formatClient(cs) == "CLIENT id=3 sub=1 raw=0 qbytes=4096 lines=58 stalled=1 "
+                              "enq=1000 sent=61040 drop=100 evict=96 kick=4\n");
+    ClientStat z;   // 空初值也必须逐字段给 0，不得出现空字段或未初始化数字
+    CHECK(formatClient(z) == "CLIENT id=0 sub=0 raw=0 qbytes=0 lines=0 stalled=0 "
+                             "enq=0 sent=0 drop=0 evict=0 kick=0\n");
+    // 缓冲够不够只能算一遍：一切数字取 uint64 满值时若内部缓冲偏小，
+    // 被截掉的恰好是最后的 kick= —— 下游会读到一个被缩短的数字而不是报错。
+    ClientStat big = z;
+    big.sub = big.raw = 1;
+    big.id = big.qbytes = big.lines = big.stalled = big.enqLines =
+    big.sentBytes = big.dropLines = big.evictLines = big.kickLines = 18446744073709551615ull;
+    CHECK(formatClient(big).size() == 257);
+    CHECK(formatClient(big).find("kick=18446744073709551615\n") != std::string::npos);
+    CHECK(formatClient(big).back() == '\n');
 
     HistAgg ha; ha.channel = 3; ha.count = 12; ha.avg = 5.5; ha.min = 1.25; ha.max = 9.75; ha.last = 4.0;
     CHECK(formatHistory(ha) == "HISTORY ch=3 count=12 avg=5.500 min=1.250 max=9.750 last=4.000\n");
