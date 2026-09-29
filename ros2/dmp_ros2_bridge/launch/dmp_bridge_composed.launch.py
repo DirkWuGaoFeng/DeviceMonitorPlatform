@@ -4,7 +4,11 @@
 # 用法:
 #   ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 mt:=true
 #   ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 mt:=false
-#   (gateway_host/gateway_port 对所有实例共用; 本项目的网关是单点汇聚, 这样够用)
+#   ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 \
+#        gw_overrides:=bed02=192.168.109.99:9100        # 只把 bed02 的网关指向一个黑洞
+#   (默认 gateway_host/port 对所有实例共用; gw_overrides 按设备覆盖 —— 机队里网关本就可能
+#    按楼层/车间分组, 而它同时是毒化实验能成立的前提: 不先做到 per-device, 就造不出
+#    "只坑一台"的场景, 那个场景是目前唯一能让单线程容器真正输掉边界。)
 #
 # 为什么要这个文件 (面试角度这才是重点):
 #   * 独立进程模型 (dmp_bridge.launch.py) 每台设备一个进程: 隔离性好, 但 50 台设备
@@ -43,11 +47,29 @@ from launch_ros.descriptions import ComposableNode
 PLUGIN = 'dmpbr::DmpBridgeNode'
 
 
+def _parse_overrides(raw):
+    """'bed02=10.0.0.9:9100,bed03=127.0.0.1:9200' -> {'bed02': ('10.0.0.9', 9100), ...}
+
+    写错不静默忽略: "我以为毒化了 bed02" 而实际覆盖没生效, 得到的就是整整一轮白跑的实验
+    (与素材录 B-30/B-35 同族: 取证工具自己骗人)。宁可 launch 阶段就报错。
+    """
+    out = {}
+    for item in [s.strip() for s in raw.split(',') if s.strip()]:
+        dev, sep, ep = item.partition('=')
+        host, csep, port = ep.rpartition(':')
+        if not sep or not csep or not dev.strip() or not host.strip() or not port.isdigit():
+            raise RuntimeError('gw_overrides 每项应为 device=host:port (端口为数字), 收到 %r' % item)
+        out[dev.strip()] = (host.strip(), int(port))
+    return out
+
+
 def _container_setup(context, *args, **kwargs):
     devices_raw = perform_substitutions(context, [LaunchConfiguration('devices')])
     mt = perform_substitutions(context, [LaunchConfiguration('mt')]).strip().lower()
-    gateway_host = LaunchConfiguration('gateway_host')
-    gateway_port = LaunchConfiguration('gateway_port')
+    gateway_host = perform_substitutions(context, [LaunchConfiguration('gateway_host')])
+    gw_port_raw = perform_substitutions(context, [LaunchConfiguration('gateway_port')])
+    conn_timeout = perform_substitutions(context, [LaunchConfiguration('connect_timeout_ms')])
+    overrides = _parse_overrides(perform_substitutions(context, [LaunchConfiguration('gw_overrides')]))
     topic_prefix = LaunchConfiguration('topic_prefix')
     frame_qos = LaunchConfiguration('frame_qos')
 
@@ -59,6 +81,21 @@ def _container_setup(context, *args, **kwargs):
         # 与其让容器抛一句含糊的 load 失败, 不如在 launch 阶段说清是谁重了。
         dup = sorted({d for d in devices if devices.count(d) > 1})
         raise RuntimeError('devices 有重复项, 同容器节点名会冲突: %s' % ','.join(dup))
+    # 覆盖一个不存在的设备 = 拼错了设备名。不拦的话它会静默地不对任何东西生效。
+    unknown = sorted(set(overrides) - set(devices))
+    if unknown:
+        raise RuntimeError('gw_overrides 里的设备不在 devices 里: %s (devices=%s)'
+                           % (','.join(unknown), devices_raw))
+    if not conn_timeout.strip().lstrip('-').isdigit():
+        raise RuntimeError('connect_timeout_ms 要是整数 (0=不设限), 收到 %r' % conn_timeout)
+    conn_timeout_ms = int(conn_timeout)
+    if conn_timeout_ms < 0:
+        raise RuntimeError('connect_timeout_ms 不能为负 (要旧行为请传 0), 收到 %d' % conn_timeout_ms)
+    if not gw_port_raw.strip().isdigit():
+        raise RuntimeError('gateway_port 要是数字端口, 收到 %r' % gw_port_raw)
+    # 端口统一成 int 再入参: C++ 侧声明的是 declare_parameter<int>, 给字符串就靠 YAML 猜类型。
+    default_ep = (gateway_host, int(gw_port_raw))
+    endpoints = [overrides.get(dev, default_ep) for dev in devices]
 
     descriptions = [
         ComposableNode(
@@ -68,13 +105,14 @@ def _container_setup(context, *args, **kwargs):
             namespace='',
             parameters=[{
                 'device_id': dev,
-                'gateway_host': gateway_host,
-                'gateway_port': gateway_port,
+                'gateway_host': ep[0],
+                'gateway_port': ep[1],
+                'connect_timeout_ms': conn_timeout_ms,   # 整数直接入参, 不让 YAML 猜类型
                 'topic_prefix': topic_prefix,
                 'frame_qos': frame_qos,
             }],
         )
-        for dev in devices
+        for dev, ep in zip(devices, endpoints)
     ]
 
     # 实测: Humble 的 component_container_mt 连 --help 都不认(会把 --help 当 ROS 参数,
@@ -99,6 +137,10 @@ def generate_launch_description():
                               description='true=多线程容器(两个回调组才有意义); false=单线程(用来复现头阻塞)'),
         DeclareLaunchArgument('gateway_host', default_value='127.0.0.1'),
         DeclareLaunchArgument('gateway_port', default_value='9100'),
+        DeclareLaunchArgument('gw_overrides', default_value='',
+                              description='按设备覆盖网关端点: bed02=host:port,bed03=host:port'),
+        DeclareLaunchArgument('connect_timeout_ms', default_value='1000',
+                              description='网关 connect 等待上限 ms; 0=不设限(仅取证对照用)'),
         DeclareLaunchArgument('topic_prefix', default_value='/dmp'),
         DeclareLaunchArgument('frame_qos', default_value='sensor'),
         OpaqueFunction(function=_container_setup),

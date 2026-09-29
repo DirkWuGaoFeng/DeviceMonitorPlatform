@@ -3,9 +3,12 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -43,9 +46,46 @@ int GatewayClient::connectNew() {
             return -1;
         }
     }
-    if (::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
-        ::close(fd);
-        return -1;
+    // 阻塞 connect 的等待上限由内核 SYN 重试决定 (VM 实测: 同网段不可达 3.11s, NAT 后黑洞 21.03s),
+    // 而本函数是在调用方的**回调里**被跑的 (tickLink / 三个服务) —— 不封顶就等于把
+    // "一个网络故障冻结整个容器" 写进了产品行为。所以: 非阻塞 connect + poll 定时。
+    if (connTimeoutMs_ == 0) {
+        // 旧行为, 只留给取证脚本做"修与不修"的对照 (生产上不应传 0)
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
+            ::close(fd);
+            return -1;
+        }
+    } else {
+        const int fl = ::fcntl(fd, F_GETFL, 0);
+        if (fl < 0 || ::fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) { ::close(fd); return -1; }
+        const int cr = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa));
+        if (cr != 0 && errno != EINPROGRESS) { ::close(fd); return -1; }   // 立即失败(如 ECONNREFUSED)
+        if (cr != 0) {                                                    // 还在握手中: 等 poll 上限
+            pollfd pf{};
+            pf.fd = fd;
+            pf.events = POLLOUT;
+            int pr;
+            // 把总预算算成 deadline 而不是每次 poll 都给满额: 否则"被信号打断就重试"
+            // 会变成重试多少次就再等多少秒, 口头上的上限又不是上限了。
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(connTimeoutMs_);
+            for (;;) {
+                const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     deadline - std::chrono::steady_clock::now()).count();
+                if (rem <= 0) { pr = 0; break; }                       // 预算用尽 = 超时
+                pr = ::poll(&pf, 1, static_cast<int>(rem));
+                if (pr >= 0 || errno != EINTR) break;
+            }
+            if (pr == 0) { ++connTimeouts_; ::close(fd); return -1; }     // 超时: 计一次
+            int soerr = 0;
+            socklen_t len = sizeof(soerr);
+            if (pr < 0 || ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0 || soerr != 0) {
+                ::close(fd);
+                return -1;
+            }
+        }
+        // 恢复阻塞: 后面的 sendAll / recvLine / 读线程都按"阻塞 + SO_RCVTIMEO"的口径写的,
+        // 把非阻塞语义泄进去会得到"recv 返回 EAGAIN 当成对端关闭"这类错判。
+        if (::fcntl(fd, F_SETFL, fl) < 0) { ::close(fd); return -1; }
     }
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));  // 帧流低延迟: 禁用 Nagle

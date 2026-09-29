@@ -107,6 +107,8 @@ private:
     std::string        qosParam_ = "sensor";      // frame_qos 参数的落地值
     uint16_t           gw_port_ = 9100;
     int                batch_ms_ = 50, diag_ms_ = 1000, rules_ms_ = 10000, link_ms_ = 1000;
+    // 单次 connect 的上限; 0 = 不设限(旧行为), 与上面那些周期不同 —— 它是故意合法的, 取证脚本靠它做对照
+    int                conn_timeout_ms_ = 1000;
     double             warn_margin_ = 0.05;
     size_t             max_pending_ = 4096;
     uint64_t           bridgeDropped_ = 0;       // 本桥缓冲溢出丢弃 (与网关 dropped 分开)

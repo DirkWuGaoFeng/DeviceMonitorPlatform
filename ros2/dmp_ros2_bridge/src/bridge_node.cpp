@@ -50,6 +50,9 @@ void DmpBridgeNode::declareParameters() {
     diag_ms_      = this->declare_parameter<int>("diag_period_ms", 1000);
     rules_ms_     = this->declare_parameter<int>("rule_refresh_ms", 10000);
     link_ms_      = this->declare_parameter<int>("link_check_ms", 1000);
+    // connect 超时: 把 R-003"任何单个回调必须短"从约定变成实现。
+    // 0 是**故意合法**的值(= 不设限, 旧行为), 所以它不能跟上面那些周期一起进"必须为正"的校验。
+    conn_timeout_ms_ = this->declare_parameter<int>("connect_timeout_ms", 1000);
     warn_margin_  = this->declare_parameter<double>("warn_margin", 0.05);
     max_pending_  = static_cast<size_t>(this->declare_parameter<int>("max_pending", 4096));
     // 帧流 QoS 可配: 默认 sensor(best_effort)。留成参数不是为了演示好看, 而是因为
@@ -58,6 +61,7 @@ void DmpBridgeNode::declareParameters() {
     const std::string qosMode = this->declare_parameter<std::string>("frame_qos", "sensor");
 
     gw_.setEndpoint(gw_host_, gw_port_);
+    gw_.setConnectTimeoutMs(conn_timeout_ms_);
     qosParam_ = qosMode;
 }
 
@@ -74,6 +78,13 @@ CallbackReturn DmpBridgeNode::on_configure(const rclcpp_lifecycle::State& /*prev
     }
     if (gw_port_ == 0) {
         RCLCPP_ERROR(this->get_logger(), "configure 拒绝: gateway_port=0 不是合法端口");
+        return CallbackReturn::FAILURE;
+    }
+    if (conn_timeout_ms_ < 0) {
+        // 负值不能静默退化成 0(=不可控长等), 也不能退化成默认值(=口头上的上限);
+        // 未知值与静默退化是同一类故障 (参照 frame_qos 的处理)。
+        RCLCPP_ERROR(this->get_logger(), "configure 拒绝: connect_timeout_ms=%d 非法 (0=不设限是合法值, 但不允许负)",
+                     conn_timeout_ms_);
         return CallbackReturn::FAILURE;
     }
     if (qosParam_ != "sensor" && qosParam_ != "reliable" && qosParam_ != "reliable_deep") {
@@ -283,8 +294,11 @@ void DmpBridgeNode::tickLink() {
         RCLCPP_INFO(this->get_logger(), "data plane up (reconnects=%llu)",
                     static_cast<unsigned long long>(gw_.reconnects()));
     } else {
-        RCLCPP_WARN(this->get_logger(), "gateway %s:%u 数据面未就绪, %dms 后重试",
-                    gw_host_.c_str(), gw_port_, link_ms_);
+        // 把 connect 超时次数带进这句 WARN: 毒化实验里它是"长回调已被消除"的直接证据 ——
+        // 只从帧间隔倒推的话, 那个结论无法独立复核。
+        RCLCPP_WARN(this->get_logger(), "gateway %s:%u 数据面未就绪 (%dms 后重试), connect 超时累计 %llu 次",
+                    gw_host_.c_str(), gw_port_, link_ms_,
+                    static_cast<unsigned long long>(gw_.connectTimeouts()));
     }
 }
 

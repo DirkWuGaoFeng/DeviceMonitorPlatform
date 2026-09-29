@@ -50,6 +50,7 @@ def generate_launch_description():
             'batch_period_ms': LaunchConfiguration('batch_period_ms'),
             'diag_period_ms': LaunchConfiguration('diag_period_ms'),
             'rule_refresh_ms': LaunchConfiguration('rule_refresh_ms'),
+            'connect_timeout_ms': LaunchConfiguration('connect_timeout_ms'),
         }],
     )
 
@@ -92,6 +93,11 @@ def generate_launch_description():
         DeclareLaunchArgument('batch_period_ms', default_value='50'),
         DeclareLaunchArgument('diag_period_ms', default_value='1000'),
         DeclareLaunchArgument('rule_refresh_ms', default_value='10000'),
+        # 单次 connect 的上限。默认 1000ms 是为了实践"任何单个回调必须短":
+        # 不加限时, 一台故障设备能把整个容器冻住 3~21 秒 (实测, 见 ADR-003)。
+        # 0 = 不设限 (= 旧行为), 只给取证脚本当对照组用。
+        DeclareLaunchArgument('connect_timeout_ms', default_value='1000',
+                              description='网关 connect 等待上限 ms; 0=不设限(仅取证用)'),
         DeclareLaunchArgument('autostart', default_value='true',
                               description='true=launch 里自动 configure+activate; false=停在 unconfigured'),
 
