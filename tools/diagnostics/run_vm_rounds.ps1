@@ -137,6 +137,17 @@ try {
     if ($raw.Length -eq 0) { Die '取回的读数是 0 字节(远端那句重定向没生效?)' }
     $cr = ([regex]::Matches($raw, [char]13)).Count
     Write-Host "  evidence: $out size=$($raw.Length) CR=$cr (CR 应为 0, 否则是编码问题)"
+    # “取回了文件”不等于“取回了一个结论”。本轮首跑就取回过一份 60 字节的读数: 远端脚本
+    # 死在 install/setup.bash 的 unbound variable 上, ssh 本身却返回 0 —— 守卫如果只看退出码就会把
+    # “没跑”当成“跑了”。判据: 没有 PASS=<数字> 这一行就直接停, 并把尾行打出来。
+    # 为什么是 PASS=\d+ 而不是 PASS=: 第一次负向测试就没拦下来 —— 那份样本里有句
+    # “这行不是 PASS=”, 文字本身含 token 就把守卫哄过去了。负向测试自己也得能证伪。
+    $lines = Get-Content $out
+    if (-not ($lines | Where-Object { $_ -match 'PASS=\d+' })) {
+        Write-Host '  读数里没有结论行, 尾部原样打出:' -ForegroundColor Yellow
+        $lines | Select-Object -Last 8 | ForEach-Object { "    $_" }
+        Die '本轮没有任何断言结论(脚本中途就退了) —— 不要把它记成“跑过了”'
+    }
     Get-Content $out | Where-Object { $_ -match '^  PASS=|^=== \[|PRED-OVERTURNED|FAIL |ASSERTS_PASS|SCRIPT_DONE' } | Select-Object -Last 20
     Write-Host "  ssh 退出码 = $rc  (非 0 不等于结论作废: 输出末尾的 PASS=/FAIL= 才是判据)"
     Write-Host "RAW_LOG=$out"

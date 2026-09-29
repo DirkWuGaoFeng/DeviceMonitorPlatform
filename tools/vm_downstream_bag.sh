@@ -24,7 +24,10 @@
 set +u
 set +e
 source /opt/ros/humble/setup.bash
-set -u
+# 不要在 source 完ROS 后就把 set -u 开回来: ament 生成的 install/setup.bash 里读了 COLCON_TRACE
+# 这类未必存在的变量。素材录 B-14 记的是 /opt/ros 那一份, 本轮(2026-09-29 首跑)在
+# install/setup.bash:11 又撞了一次 —— 同一条不兼容对**每个** ament 脚本都成立, 不是某一个的毛病。
+# 代价只是少一个拼写检查; 换来的是一句无声死在环境加载里的 rc=1 与 60 字节日志。
 DMP_HOME="${DMP_HOME:-$HOME/RosProject}"
 cd "$DMP_HOME/dmp" || exit 1
 source install/setup.bash
