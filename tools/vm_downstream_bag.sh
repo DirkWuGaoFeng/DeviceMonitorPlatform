@@ -129,10 +129,17 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from diagnostic_msgs.msg import DiagnosticArray
 out, dur = sys.argv[1], float(sys.argv[2])
 rows = []
+def lv_of(s):
+    # rclpy 把消息里的 uint8 字段反序列化成 **bytes**(不是 int): DiagnosticStatus.level 拿到的是 b'\x00'。
+    # 2026-09-29 本轮实测: 直接写 int(s.level) 抛 ValueError, 异常从回调里冒出去把 spin 整个打断,
+    # 于是两侧都收到 0 项 —— 一个脚本自己的 bug 看上去完全像"聚合栈没工作"。
+    # 正因为同一格还并列了一个**原始侧**的阳性对照, 才能当场看出错在我这里而不是链路那里。
+    v = s.level
+    return v[0] if isinstance(v, (bytes, bytearray)) and len(v) == 1 else int(v)
 def mk(tag):
     def cb(m):
         for s in m.status:
-            rows.append((tag, s.name, int(s.level), s.hardware_id, s.message))
+            rows.append((tag, s.name, lv_of(s), s.hardware_id, s.message))
     return cb
 rclpy.init(); n = Node('dmp_agg_probe')
 qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
@@ -287,7 +294,7 @@ agg_dump "$LOG/agg_both.csv" 10
 KV=$(agg_judge "$LOG/agg_both.csv" 2>"$LOG/agg_sample.txt")
 echo "  读数: $KV"
 echo "  探针侧: $(cat "$LOG/agg_both.csv.meta" 2>/dev/null | tr '\n' '|') err尾行: $(tail -1 "$LOG/agg_both.csv.err" 2>/dev/null)"
-echo "  聚合项样例: $(cut -d= -f2- "$LOG/agg_sample.txt" 2>/dev/null | head -1)"
+echo "  聚合项样例: $(grep -m1 '^AGG_SAMPLE=' "$LOG/agg_sample.txt" 2>/dev/null | cut -d= -f2-)"
 chk "阳性对照: 同窗两侧都收到了东西 (原始 $(g "$KV" RAW_N) 项 / 聚合 $(g "$KV" AGG_N) 项)" \
     "$(python3 -c "print(1 if $(g "$KV" RAW_N) > 0 and $(g "$KV" AGG_N) > 0 else 0)")" "1"
 chk "我们的 telemetry_link 进了聚合结果 ($(g "$KV" LINK_IN) 项)" \
