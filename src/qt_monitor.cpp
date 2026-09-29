@@ -9,7 +9,12 @@
 #include "dmp/acquisition.h"
 #include "dmp/storage.h"   // TeeSink
 
+#include <cmath>
 #include <cstdio>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <QApplication>
 #include <QMainWindow>
@@ -233,6 +238,7 @@ public:
             acq_.drain(256);
             dbSink_.commit();
             chartSink_->present(30.0);
+            if (!connected_) return;   // 未进入已连接态(含网关握手中/阈值回读被拒)时不覆盖状态栏提示
             auto st = acq_.stat();
             status_->setText(QString("已连接 %1  ·  ok=%2  crcErr=%3  drop=%4")
                                  .arg(connectedVia()).arg(st.ok).arg(st.crcErr).arg(acq_.dropped()));
@@ -380,6 +386,13 @@ public:
         //    字节还在我腿里没排干”导致的偶发差 0~4 帧。
         long long ok1 = stableStatsSnapshot(stats, raw);
         if (ok1 < 0) return fail("STATS 末值读取失败");
+
+        // T1.2 §7-1: 阈值权威回读核对 —— 在纯命令的 stats 腿上下发本地 RULE 并回读比对 low/high。
+        //   stats 腿不订阅 RAW, 只有文本命令应答, 与 raw 腿互不干扰(无混流)。
+        std::string thrDiag;
+        const long long thrBad = verifyThresholdReadbackCmd(stats, thrDiag);
+        const bool thrOk = (thrBad == 0);
+
         const auto st = acq_.stat();
         const long long gwDelta = ok1 - ok0;
         const long long localDelta = static_cast<long long>(st.ok) - static_cast<long long>(local0);
@@ -389,14 +402,16 @@ public:
         //   RAW 流会让 local 持续低于 gw 多批、或 torn 帧使 crcErr>0（本地解码器对残帧必报）。
         const long long kBatch = 4;                     // device_simulator 每轮 4 通道 = 一个原子批次
         const long long diff = gwDelta - localDelta;
-        bool pass = (st.crcErr == 0) && (localDelta > 0) && (diff <= kBatch && diff >= -kBatch);
+        bool pass = (st.crcErr == 0) && (localDelta > 0) && (diff <= kBatch && diff >= -kBatch) && thrOk;
         char line[240];
         std::snprintf(line, sizeof(line),
-                      "VERIFY_GW gw=%lld:%lld(+%lld) local=%lld:%lld(+%lld) diff=%lld crcErr=%llu win=%dms -> %s\n",
+                      "VERIFY_GW gw=%lld:%lld(+%lld) local=%lld:%lld(+%lld) diff=%lld crcErr=%llu thrBad=%lld win=%dms -> %s\n",
                       ok0, ok1, gwDelta, (long long)local0, (long long)st.ok, localDelta,
-                      diff, (unsigned long long)st.crcErr, runMs,
+                      diff, (unsigned long long)st.crcErr, thrBad, runMs,
                       pass ? "PASS" : "FAIL");
         std::printf("%s", line); std::fflush(stdout);
+        if (thrBad != 0)          // 阈值回读不一致/协议错: 另起一行给可定位诊断, 不塞进主行(免得撑爆固定缓冲)
+            std::printf("VERIFY_GW thr_diag=%s\n", thrBad < 0 ? "protocol-error" : thrDiag.c_str());
         QString p = QCoreApplication::applicationDirPath() + "/qt_gateway_verify.txt";
         if (FILE* f = std::fopen(p.toLocal8Bit().constData(), "w")) { std::fputs(line, f); std::fclose(f); }
         raw.disconnectFromHost(); stats.disconnectFromHost();
@@ -451,6 +466,86 @@ private:
         return ok;
     }
 
+    // ---- T1.2 §7-1: 阈值权威回读核对 (Qt 为配置权威) ----
+    // 依据本地 acq_.rules() 生成 "RULE <type> <low> <high>\n" 下发串。不带 msg：
+    //   回读只比 low/high，且文案里的多字节/空格给行协议匹配添乱没有收益。
+    QByteArray buildRulePush() const {
+        QByteArray out;
+        for (const auto& r : acq_.rules()) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "RULE %d %g %g\n",
+                          static_cast<int>(r.type), static_cast<double>(r.low), static_cast<double>(r.high));
+            out += buf;
+        }
+        return out;
+    }
+
+    // 解析一条 RULES 回读行 "RULE type=%u name=%s low=%.3f high=%.3f msg=%s"。只取 type/low/high。
+    //   注: RULE_ACK 行以 "RULE_ACK" 开头(第 5 字符是 '_' 非空格), 不匹配本模式的 "RULE " 前缀,
+    //   且调用方已先用 startsWith("RULE type=") 过滤, 不会误喂 ACK 行。
+    static bool parseRuleLine(const QByteArray& line, int& type, float& low, float& high) {
+        char name[32] = {0}, msg[96] = {0};
+        int t = 0; double lo = 0, hi = 0;
+        const int n = std::sscanf(line.constData(),
+            "RULE type=%d name=%31s low=%lf high=%lf msg=%95s", &t, name, &lo, &hi, msg);
+        if (n < 4) return false;                       // 至少要读到 high 才算完整
+        type = t; low = static_cast<float>(lo); high = static_cast<float>(hi);
+        return true;
+    }
+
+    // 把回读集合(seen: type -> low/high)与本地规则逐条比 low/high。只看本地持有的类型
+    //   (网关可能有其它类型规则, 与本端权威无关); 本地有而回读缺 => 记不一致。
+    //   容差 1e-3 对齐网关 %.3f 打印精度。返回不一致条数, 诊断写入 diag(一致时为空)。
+    int verifyThresholdAgainstLocal(const std::map<int, std::pair<float, float>>& seen, std::string& diag) const {
+        int bad = 0;
+        char buf[160];
+        for (const auto& r : acq_.rules()) {
+            const int t = static_cast<int>(r.type);
+            auto it = seen.find(t);
+            if (it == seen.end()) {
+                ++bad;
+                std::snprintf(buf, sizeof(buf), "type=%d 回读缺失; ", t);
+                diag += buf;
+                continue;
+            }
+            const float eps = 1e-3f;
+            if (std::fabs(it->second.first - r.low) > eps || std::fabs(it->second.second - r.high) > eps) {
+                ++bad;
+                std::snprintf(buf, sizeof(buf), "type=%d low回读%.3f≠本地%.3f high回读%.3f≠本地%.3f; ",
+                              t, static_cast<double>(it->second.first), static_cast<double>(r.low),
+                              static_cast<double>(it->second.second), static_cast<double>(r.high));
+                diag += buf;
+            }
+        }
+        return bad;
+    }
+
+    // 纯命令腿(不订阅 RAW, 无混流)上做一次端到端阈值回读核对:
+    //   下发本地 RULE 集 -> RULES(回读) -> HELP(屏障: 其 "COMMANDS" 应答界定 RULES 块结束,
+    //   因为网关按序处理命令, HELP 应答必在全部 RULE 回读行之后到达)。
+    //   返回不一致条数(0=一致), -1=协议/超时错。
+    long long verifyThresholdReadbackCmd(QTcpSocket& cmd, std::string& diag) {
+        QByteArray push = buildRulePush(); push += "RULES\n"; push += "HELP\n";
+        cmd.write(push); cmd.flush();
+        std::map<int, std::pair<float, float>> seen;
+        QByteArray buf;
+        for (int guard = 0; guard < 200; ++guard) {
+            for (;;) {
+                int nl = buf.indexOf('\n');
+                if (nl < 0) break;
+                QByteArray line = buf.left(nl); buf = buf.mid(nl + 1);
+                if (line.startsWith("COMMANDS")) return verifyThresholdAgainstLocal(seen, diag);
+                if (line.startsWith("RULE type=")) {
+                    int t; float lo, hi;
+                    if (parseRuleLine(line, t, lo, hi)) seen[t] = std::make_pair(lo, hi);
+                }
+            }
+            if (!cmd.waitForReadyRead(2000)) return -1;
+            buf.append(cmd.readAll());
+        }
+        return -1;
+    }
+
     void dumpStatsAndQuit() {
         auto st = acq_.stat();
         char line[160];
@@ -493,7 +588,7 @@ private:
     void disconnectAll() {
         if (tcp_) { tcp_->disconnectFromHost(); tcp_->deleteLater(); tcp_ = nullptr; }
         if (serial_) { if (serial_->isOpen()) serial_->close(); serial_->deleteLater(); serial_ = nullptr; }
-        gwMode_ = false; gwHandshakeDone_ = false; gwRxBuf_.clear();
+        gwMode_ = false; gwHandshakeDone_ = false; gwRxBuf_.clear(); gwReadback_.clear();
     }
 
     void toggleConnect() {
@@ -510,19 +605,48 @@ private:
             tcp_ = new QTcpSocket(this);
             QObject::connect(tcp_, &QTcpSocket::readyRead, this, [this, onBytes]{
                 QByteArray b = tcp_->readAll();
-                if (gwMode_ && !gwHandshakeDone_) {          // 先吃掉头上的 +RAW\n 回显，其后字节才是帧流
+                if (gwMode_ && !gwHandshakeDone_) {
+                    // 命令态握手: 逐行吃掉 +RAW 之前的 RULE_ACK/RULES 回读文本; 命中 +RAW 后其后字节才是帧流。
                     gwRxBuf_.append(b);
-                    int nl = gwRxBuf_.indexOf('\n');
-                    if (nl < 0) return;                       // 回显行还没收全，等下一段
-                    b = gwRxBuf_.mid(nl + 1);
-                    gwRxBuf_.clear();
-                    gwHandshakeDone_ = true;
+                    for (;;) {
+                        int nl = gwRxBuf_.indexOf('\n');
+                        if (nl < 0) return;                       // 行还没收全, 等下一段
+                        QByteArray line = gwRxBuf_.left(nl);       // 不含 \n
+                        gwRxBuf_ = gwRxBuf_.mid(nl + 1);
+                        if (line == "+RAW") {
+                            gwHandshakeDone_ = true;
+                            std::string diag;
+                            const int bad = verifyThresholdAgainstLocal(gwReadback_, diag);
+                            if (bad > 0) {                        // §7-1: 回读不一致 => 标红 + 拒绝进入已连接态 + 断开
+                                status_->setText(QString("网关阈值回读不一致(%1 条): %2 — 拒绝连接")
+                                                 .arg(bad).arg(QString::fromStdString(diag)));
+                                disconnectAll(); connected_ = false; connectBtn_->setText("连接");
+                                return;
+                            }
+                            connectBtn_->setText("断开"); connected_ = true;
+                            if (!gwRxBuf_.isEmpty()) { onBytes(gwRxBuf_); gwRxBuf_.clear(); }
+                            return;
+                        }
+                        if (line.startsWith("RULE type=")) {       // RULES 回读行(RULE_ACK 行不以 "RULE " 开头, 自然被跳过)
+                            int t; float lo, hi;
+                            if (parseRuleLine(line, t, lo, hi)) gwReadback_[t] = std::make_pair(lo, hi);
+                        }
+                    }
                 }
                 onBytes(b);
             });
             QObject::connect(tcp_, &QTcpSocket::connected, this, [this]{
-                if (gwMode_) tcp_->write("RAW\n");            // 网关需先握 RAW 才开始逐字节透传
-                connectBtn_->setText("断开"); connected_ = true;
+                if (gwMode_) {
+                    // T1.2 §7-1: 进入 RAW 透传前, 先在命令态下发本地阈值 + RULES 回读 + RAW; 一致后才允许"已连接"。
+                    gwReadback_.clear(); gwHandshakeDone_ = false;
+                    tcp_->write(buildRulePush());
+                    tcp_->write("RULES\n");
+                    tcp_->write("RAW\n");
+                    tcp_->flush();
+                    status_->setText("网关握手中：等待 +RAW 与阈值回读…");
+                } else {
+                    connectBtn_->setText("断开"); connected_ = true;
+                }
             });
             QObject::connect(tcp_, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError){
                 status_->setText("TCP 错误: " + tcp_->errorString());
@@ -609,10 +733,12 @@ private:
     QTcpSocket*  tcp_ = nullptr;
     QSerialPort* serial_ = nullptr;
     bool         connected_ = false;
-    // 网关 (TCP RAW) 模式：连接后先吃 +RAW\n 回显，其后字节才交解码器（见 toggleConnect）
+    // 网关 (TCP RAW) 模式：进入 RAW 透传前先在命令态下发本地阈值并回读核对(§7-1)，
+    //   吃掉 +RAW 之前的 RULE_ACK/RULES 文本应答行，其后字节才交解码器（见 toggleConnect）。
     bool         gwMode_ = false;
     bool         gwHandshakeDone_ = false;
     QByteArray   gwRxBuf_;
+    std::map<int, std::pair<float, float>> gwReadback_;   // type -> (low, high) 网关回读值
 
     // UI 控件
     QComboBox* srcBox_ = nullptr;

@@ -2,11 +2,13 @@
 #
 # 作用: 起 device_simulator(上游 TCP) -> 起 gateway_service(监听 GW_PORT, 上游连 simulator) ->
 #       连续跑 N 轮 `qt_monitor --verify-gateway 127.0.0.1 <GW_PORT> <WIN_MS>`，
-#       统计 PASS / 精确相等 / 最大|diff|。判据: 网关 STATS.ok 本轮增量 == Qt 本地解码条数, 且 crc_err==0。
+#       统计 PASS / 精确相等 / 最大|diff| / 阈值回读一致。
+#       判据: 网关 STATS.ok 本轮增量 == Qt 本地解码条数, 且 crc_err==0, 且阈值回读 thrBad==0 (§7-1)。
 #
 # 依据(方案 §4 / T1.2 验收): RAW 透传逐字节无损 => 同一条上游帧流, 网关解一份、Qt 解一份, 增量应相等。
 #   两条独立 TCP 连接对 5Hz 连续源做非原子采样, 用「双静默快照」(两次网关读数相等且期间 raw 零新字节)
 #   把基线/末值锁定在同一批次间隙 -> 实测可做到逐位 diff=0。
+#   §7-1 阈值权威回读: stats 命令腿下发本地 RULE 集 + RULES 回读 + HELP 屏障, 逐条比 low/high。
 #
 # 用法: .\tools\diagnostics\t12_gateway_verify.ps1 [-Rounds 20] [-WinMs 3000] [-SimPort 9321] [-GwPort 9322]
 #   前置: build_qt\ 下已有 device_simulator.exe / gateway_service.exe / qt_monitor.exe (见 build_qt.ps1)
@@ -27,21 +29,23 @@ $gw  = Start-Process -FilePath 'build_qt\gateway_service.exe' -ArgumentList "$Gw
 Start-Sleep -Milliseconds 1000
 Write-Output "sim pid=$($sim.Id) gw pid=$($gw.Id) alive: sim=$(-not $sim.HasExited) gw=$(-not $gw.HasExited)"
 
-$pass = 0; $exact = 0; $maxAbs = 0
+$pass = 0; $exact = 0; $maxAbs = 0; $thrOk = 0
 for ($r = 1; $r -le $Rounds; $r++) {
     $out  = & 'build_qt\qt_monitor.exe' --verify-gateway 127.0.0.1 $GwPort $WinMs 2>&1
-    $line = ($out | Select-String 'VERIFY_GW').Line
+    $line = ($out | Select-String 'VERIFY_GW gw=').Line
     if ($LASTEXITCODE -eq 0) { $pass++ }
     if ($line -match 'diff=(-?\d+)') {
         $d = [int]$Matches[1]
         if ($d -eq 0) { $exact++ }
         if ([Math]::Abs($d) -gt $maxAbs) { $maxAbs = [Math]::Abs($d) }
     }
+    # §7-1 阈值回读: thrBad==0 才算一致(缺字段或 -1 协议错一律计为不一致)
+    if ($line -match 'thrBad=(-?\d+)' -and [int]$Matches[1] -eq 0) { $thrOk++ }
     Write-Output ("round {0}/{1} exit={2} :: {3}" -f $r, $Rounds, $LASTEXITCODE, $line)
 }
-Write-Output "=== T1.2 VERIFY_GW: PASS $pass / $Rounds ; 精确相等 $exact / $Rounds ; 最大|diff| = $maxAbs (每批=4 帧) ==="
+Write-Output "=== T1.2 VERIFY_GW: PASS $pass / $Rounds ; 精确相等 $exact / $Rounds ; 最大|diff| = $maxAbs (每批=4 帧) ; 阈值回读一致 $thrOk / $Rounds ==="
 
 Stop-Process -Id $gw.Id  -Force -ErrorAction SilentlyContinue
 Stop-Process -Id $sim.Id -Force -ErrorAction SilentlyContinue
 Write-Output "stopped gw+sim"
-if ($pass -eq $Rounds) { exit 0 } else { exit 1 }
+if ($pass -eq $Rounds -and $thrOk -eq $Rounds) { exit 0 } else { exit 1 }
