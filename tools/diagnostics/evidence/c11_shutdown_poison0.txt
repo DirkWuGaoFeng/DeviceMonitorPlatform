@@ -1,0 +1,76 @@
+=== [0] simulator + gateway (本地, 排除网络变量) ===
+=== [1] unconfigured (autostart:=false): 采集路径必须压根不存在 ===
+  [图诊断 [1]开头] /dmp/frames: 现场=0 daemon=0
+  [图诊断 [1]开头] 容器/桥: 55743 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [图诊断 [1]开头] 其它 ROS 参与者(python 订阅方/CLI): 
+  [图诊断 [1]开头] 上一个容器已活多久: 13 
+  node 在吗: 1  (期望 1: 节点本身构造即存在)
+  PASS unconfigured 时 /dmp/frames 不在 topic list (=0)
+  PASS unconfigured 时自研服务不在 service list (=0)
+  (为什么不用 ros2 service call 的报错文本来断言: 服务不存在时它会一直卡在 waiting for service,
+   timeout 剔掉后 stdout 是空的, 只会得到一句[到底是没起来还是没联通]的模糊结论 —— 见素材录 B-15)
+  (生命周期服务 change_state 反过来必须一直在 —— 它是进入其它状态的唯一入口, 由 LifecycleNode 基类在构造期创建)
+  PASS change_state 服务在 (=1)
+=== [2] configure -> inactive: 话题/服务出现, 但零数据, 且写路径被拒 ===
+Transitioning successful
+  PASS state=inactive (=inactive)
+  PASS configure 后 /dmp/frames 出现 (=1)
+  inactive 期间采样: {"count": {}, "max_gap_ms": {}, "stalls": {}, "thr_ms": 400.0}
+  PASS inactive 零数据(守卫生效, 不是碰巧) (=0)
+  inactive 下 selftest(应当仍在并自报状态):
+    healthy=False
+    state=inactive
+  set_rule 未激活: accepted=False
+  set_rule 未激活: reason='bridge not active (state=inactive)'
+  get_rules 未激活仍可读(读操作不该被状态机挡住): 1 条 Rule(
+=== [3] activate -> active: 数据与写路径同时恢复 ===
+Transitioning successful
+  PASS state=active (=active)
+  active 期间采样: {"count": {"bed01": 30}, "max_gap_ms": {"bed01": 200.7}, "stalls": {}, "thr_ms": 400.0}
+  PASS active 有数据 (=30 批)
+  set_rule 激活后: accepted=True
+=== [4] deactivate -> cleanup: 数据再次归零, 且 publisher 真的被释放 ===
+Transitioning successful
+  PASS deactivate 后再次零数据(证明状态机不是只做一次性启动) (=0)
+Transitioning successful
+  [图诊断 [4]cleanup后] /dmp/frames: 现场=0 daemon=0
+  [图诊断 [4]cleanup后] 容器/桥: 55743 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [图诊断 [4]cleanup后] 其它 ROS 参与者(python 订阅方/CLI): 
+  [图诊断 [4]cleanup后] 上一个容器已活多久: 94 
+  PASS cleanup 后 /dmp/frames 再消失(on_cleanup 真释放了 publisher) (=0)
+  (只打一行日志不算证据: 话题从 ROS 图上消失才是 publisher 对象析构的外部可观测结果)
+=== [5] 组合容器 A/B: 一台设备的阻塞 RPC 会不会拖住另一台设备的数据面 ===
+--- mt (component_container_mt, 两个回调组分到不同线程) ---
+  mt : 空载 批数= 60 最大间隔= 250.4ms 停顿(>400ms)= 0 | 控制面打满 批数= 60 最大间隔= 212.9ms 停顿(>400ms)= 0
+        bed01 的 set_rule 队列: calls=200 peak_inflight=8 ctl_avg_ms=651.5 ctl_max_ms=748.5  (客户端观测往返, 含排队)
+--- st (component_container, 单线程: 一个回调阻塞 = 全容器阻塞) ---
+  st : 空载 批数= 60 最大间隔= 273.0ms 停顿(>400ms)= 0 | 控制面打满 批数= 59 最大间隔= 325.5ms 停顿(>400ms)= 0
+        bed01 的 set_rule 队列: calls=199 peak_inflight=8 ctl_avg_ms=655.0 ctl_max_ms=736.0  (客户端观测往返, 含排队)
+        [假设不成立] 队列已排起(往返 655.0 ms, 峰值并发 8)但 st 数据面未被拖住
+                   → 损害被单个回调时长封顶, 不随队列总长放大; 不要读成[实验失败]
+  判读口径: 帧的自然节律≈200ms(仿真器 5Hz), 所以基线不是 batch_period_ms=50 —— 停顿阈值取 400ms。
+  预设预期(写完再跑): st 的 busy 最大间隔/停顿次数显著高于其 quiet 基线, mt 两行接近。
+  本轮实测: mt: 空载250.4→打满212.9ms(差-37.5) 批数60→60 停顿0→0 | st: 空载273.0→打满325.5ms(差+52.5) 批数60→59 停顿0→0
+  本轮差值的符号/大小都不足以归因(单轮); mt/st 孰优孰劣的结论只在 ADR-003 的 7 轮重复表里, 而那张表里连中位数的大小关系都会随样本集合翻转 —— 那就是没有效应。
+=== [6] 毒化 A/B: 把一台设备的网关端点换成坏地址, 单线程容器会不会真的输 ===
+  POISON=0 -> 跳过 [6][7] (只看状态机断言)
+    候选 10.255.255.1:9100: outcome=err=ECONNREFUSED 21025 ms
+  worst档 = 10.255.255.1:9100 (21025 ms)
+  fast 档 = 127.0.0.1:19999 (0 ms, 对照组)
+=== [7] 错误隔离: 一个组件 configure 失败, 同容器的另一台还活着吗 ===
+=== [8] on_shutdown: 转换回调与进程退出是**两条不同的路** ===
+  PASS shutdown 前它确实在发(否则后面的零批无意义) 20 批 (=1)
+Transitioning successful
+  PASS active -> shutdown 后状态确实是 finalized (=finalized)
+  PASS on_shutdown 回调真跑了(日志有'桥已静默') (=1)
+  PASS shutdown 后数据面静默(定时器与网关线程都停了) 0 批 (=0)
+  (话题仍在图上不矛盾: 对象要到 on_cleanup 才析构, 这一段走的是 active->shutdown 直跳 finalized)
+  PASS SIGINT 后节点自行退出(15s 内, 不退就是悬挂线程) (=0)
+  PASS 退出码=0(SIGINT 走的是 spin 返回这条路, 不是崩溃/被杀) (=0)
+=== [9] 汇总 ===
+  PASS=16 FAIL=0   (Q3 的状态机断言全部走这几个 PASS/FAIL, 不靠人眼看日志)
+  Q4 的结论不在这里: 它是一组毫秒数, 看上面 mt / st 两行自己比。
+  Q6/Q7 同上: [6] 的表格与 [7] 的 PASS/FAIL 才是结论, 本脚本不替它们说话。
+  [8] 只验 on_shutdown 回调与退出码两件事 —— 它们是两条不同的路, 不在一条断言里绑。
+ALL_LIFECYCLE_ASSERTS_PASS
+SCRIPT_DONE

@@ -106,7 +106,13 @@ ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 m
 ```
 
 三个阶段各自可断言（`tools/vm_lifecycle_compose.sh` 的 [1] 段，c8 当时 **PASS=10 FAIL=0**；
-脚本后来又长了 [6] 毒化 A/B、[7] 错误隔离与 [8] `on_shutdown` 三段，现在整轮是 25 项，见本节末尾）：
+脚本后来又长了 [6] 毒化 A/B、[7] 错误隔离与 [8] `on_shutdown` 三段）：
+
+**整轮断言数（2026-09-29 VM 实跑，不是推算）**：`POISON=1` 完整轮 **PASS=25 FAIL=0**，
+构成 [1]3 + [2]3 + [3]2 + [4]2 + [6]4 + [7]5 + [8]6 = 25；`POISON=0` 快档按设计跳过 [6][7]，
+同一套脚本给出 **PASS=16 FAIL=0**（10 + [8]6）。两档的原始读数都在
+`tools/diagnostics/evidence/c11_full_poison1.txt` / `c11_shutdown_poison0.txt`。
+原始日志见本节末「[8] 实跑结果」。
 
 | 阶段 | 话题/服务 | 数据 | 写路径 |
 |---|---|---|---|
@@ -182,7 +188,7 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
 4. **限时是封顶而不是消除**：20.0× → 3.0×、236× → 5.5×。残余间隔≈两个上限（相邻两个 tick 各撞一次 1s），
    与实测 2.0s 吻合；mid 档的 6.23s 也正好是 2×3.09s——同一个机制解释两个数字，这是它们可信的原因。
 
-### [7] 组件错误隔离（R-008 的姊妹项，四条断言全过）
+### [7] 组件错误隔离（R-008 的姊妹项，五条断言全过）
 
 `gw_overrides:=bed01=127.0.0.1:0` 恰好是一条**真**的每设备 configure FAILURE（端口 0 是 C++ 侧本来就拒的值），
 不需要人造故障。实测：bed01 被拒后停在 `unconfigured`（不是一路推到 active）、容器进程还在、
@@ -203,7 +209,22 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
 网关读线程没 join 干净正是这个形状）→ 退出码为 0。
 
 一个设计上得写清的点：`active->shutdown` 直跳 `finalized` 时话题仍在图上（publisher 对象要到
-`on_cleanup` 才析构），所以本段不断言图，只落在回调 + 数据面 + 退出码上。实跑结果见下一节末。
+`on_cleanup` 才析构），所以本段不断言图，只落在回调 + 数据面 + 退出码上。
+
+**实跑结果（2026-09-29，VM `HEAD=c14f735`，两档各一次，六条全绿）**：
+
+| 断言 | 期望 | POISON=1 | POISON=0 |
+|---|---|---|---|
+| 阳性对照：shutdown 前确实在发 | >10 批 | PASS（20 批） | PASS（20 批） |
+| active→shutdown 后状态 | `finalized` | PASS | PASS |
+| `on_shutdown` 回调真跑了（日志有「桥已静默」） | 1 次 | PASS | PASS |
+| shutdown 后数据面静默 | 0 批 | PASS | PASS |
+| SIGINT 后 15s 内自行退出 | 未退=0 | PASS | PASS |
+| 退出码 | 0 | PASS | PASS |
+
+两档的六个读数完全一致，这本身就是想要的效果：[8] 只依赖单个桥进程与 `ros2 run` 侧的可执行文件，
+不依赖 [6][7] 的容器档位。阳性对照那条尤其不能省——没有它，「shutdown 后 0 批」是一条永远为真的断言
+（素材录 B-27）。原始输出：`tools/diagnostics/evidence/c11_full_poison1.txt`、`c11_shutdown_poison0.txt`。
 
 ## QoS 事故复盘：我原来的假设是反的
 
@@ -275,7 +296,8 @@ POSIX 的 `nfds` 必须是 **max_fd + 1**，传 0 等于"一个描述符都不�
 - **intra-process 通信**（本轮没做也不吹）：同容器内的 `/dmp/frames` 仍走 DDS，组件化只省下
   “每设备一份进程 + 一份 DDS 参与者”那笔固定开销。开 `use_intra_process_comms` 后，
   先用本轮同一套可证伪判据（基线自然节律 + 停顿计数）量它到底省不省，**不拿它当默认答案**。
-- **网关端点可按设备覆盖**：现在 `gateway_host` 全设备共用一个参数，所以没法人为制造
-  “某一台连接黑洞 ⇒ 单个回调阻塞数秒”——而那是唯一可能让 `st` 真正输掉场景的边界（ADR-003 已列为未覆盖项）。
-- **错误隔离**：组合容器里一个组件 `on_configure` 失败会不会连累同容器其它组件（R-008 的姊妹项）。
+- **网关端点可按设备覆盖**：✅ 已做——`launch` 的 `gw_overrides`（格式 `bed01=host:port`）把毒化变量做成了可控量，
+  “某一台连接黑洞 ⇒ 单个回调阻塞数秒”正是靠它量出 mid 档 20.0× 的（见上面的 [6] 节）。
+- **错误隔离**：✅ 已验（见上面的 [7] 节，五条断言）。
+- **`on_shutdown`**：✅ 已验（见上面的 [8] 节，六条断言两档各一次）——ADR-003 原本挂着“未覆盖”的最后一条边界已闭合。
 - `/dmp/frames` → `topic_to_ptp`/`pose_broadcaster` 一类的下游联动

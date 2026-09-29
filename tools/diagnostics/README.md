@@ -30,15 +30,24 @@
 | `vm_check_verdict.sh` | VM | 不重跑整机验收，只验 `bash -n` + 那段动态结论行的 python | 素材录 B-35（结论行不许写死） | 可复用 |
 
 主验收脚本本身在上一级：`tools/vm_lifecycle_compose.sh`（[0]~[9]，含毒化 A/B、错误隔离、`on_shutdown`）。
+它一共有两档，两档的断言总数不同——写进文档的那个数必须带上档位：
+
+| 档位 | 跑哪些格 | 断言数（实跑） |
+|---|---|---|
+| `POISON=1`（默认全量） | [1]3 + [2]3 + [3]2 + [4]2 + [6]4 + [7]5 + [8]6 | **PASS=25 FAIL=0** |
+| `POISON=0`（快档，跳过 [6][7]） | [1]3 + [2]3 + [3]2 + [4]2 + [8]6 | **PASS=16 FAIL=0** |
 
 ## 最短复跑路径
 
 ```bash
 # 远端机器上, 仓库根目录:
 bash tools/vm_lifecycle_compose.sh                      # 全量(含 [6] 毒化与 [7] 隔离, 约 12 分钟)
-POISON=0 bash tools/vm_lifecycle_compose.sh             # 只要状态机+on_shutdown 断言(约 3 分钟)
+POISON=0 bash tools/vm_lifecycle_compose.sh             # 只要状态机+on_shutdown 断言(约 3 分钟, 16 条)
 POISON=1 POISON_LEVELS="mid" LOG=/tmp/dmp_mid bash tools/vm_lifecycle_compose.sh
 ```
+
+跑之前先确认远端 `HEAD` 就是本地 `HEAD`（断言数是要写进文档的数字，测错版本等于没测——素材录 B-30/B-43）；
+输出请重定向到 **`$LOG` 目录之外**再 scp 取回，用 `Tee-Object` 抓 ssh 输出会被控制台编码二次解码成乱码。
 
 ## 原始读数（`evidence/`）
 
@@ -48,6 +57,8 @@ POISON=1 POISON_LEVELS="mid" LOG=/tmp/dmp_mid bash tools/vm_lifecycle_compose.sh
 | `c9_runs.txt` | 毒化实验 4 轮（含修尺子后的重跑），每轮的表格 + `PASS=/FAIL=` |
 | `c9_ground.txt` / `c9_mid.txt` | fast×2 与 mid×2 轮，含 `图诊断` 两路读数行 |
 | `c9_probeone.txt` | 定因那一次：单轮（mid+worst）跑完后的 `+0s/+15s/+30s` 三行两路读数 |
+| `c11_full_poison1.txt` | `POISON=1` 整轮（远端 `HEAD=c14f735`）：[6] 八格表 + [7] 五条 + [8] 六条，`PASS=25 FAIL=0` |
+| `c11_shutdown_poison0.txt` | `POISON=0` 快档：[8] 六条与状态机十条，`PASS=16 FAIL=0`（[6][7] 按设计跳过，日志里有那行“跳过”声明） |
 
 这些是**当时那一次**的输出原文（GBK/UTF-8 混排，控制台里可能显示成乱码，字节是对的），不是重新生成的摘要。
 复跑会得到新数字——尤其是绝对毫秒数会随机器变化；文档里能站住的是**同格配对比值**与符号分布，
