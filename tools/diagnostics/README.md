@@ -28,6 +28,7 @@
 | `vm_ab_repeat.sh` | VM | 同一脚本不改一行重复 3 轮，只提 A/B 与队列行 | 「差值符号轮次间翻转」那条判据 | 可复用 |
 | `vm_diag_c8.sh` | VM | 为什么 active 期 recorder 得到 0 批、组件到底装上没有 | 素材录 B-01 / B-03 / B-07 那族"零数据" | 一次性诊断 |
 | `vm_check_verdict.sh` | VM | 不重跑整机验收，只验 `bash -n` + 那段动态结论行的 python | 素材录 B-35（结论行不许写死） | 可复用 |
+| `vm_aggregator_probe.sh` | VM | 不写断言，只量接口：`diagnostic_aggregator` 的节点名、聚合话题名、参数文件顶层键、条目名形状 | [6] 那格动手之前必须先有的地基 | 一次性侦查（它的读数被阶段间残留污染过，素材录 B-51） |
 
 主验收脚本本身在上一级：`tools/vm_lifecycle_compose.sh`（[0]~[9]，含毒化 A/B、错误隔离、`on_shutdown`）。
 它一共有两档，两档的断言总数不同——写进文档的那个数必须带上档位：
@@ -37,12 +38,13 @@
 | `POISON=1`（默认全量） | [1]3 + [2]3 + [3]2 + [4]2 + [6]4 + [7]5 + [8]6 | **PASS=25 FAIL=0** |
 | `POISON=0`（快档，跳过 [6][7]） | [1]3 + [2]3 + [3]2 + [4]2 + [8]6 | **PASS=16 FAIL=0** |
 
-另一套独立验收也在上一级：`tools/vm_downstream_bag.sh`（下游联动 e1，让生态组件 rosbag2 存/取/回放 `/dmp/frames`）。
-它是**另一套 12 条**，与上面那个 25/16 不共用、不相加，写文档时不要当成同一轮的读数：
+另一套独立验收也在上一级：`tools/vm_downstream_bag.sh`（下游联动，让生态组件真消费本项目的话题：
+rosbag2 存/取/回放 `/dmp/frames`，`diagnostic_aggregator` 聚合 `/diagnostics`）。
+它是**另一套 22 条**，与上面那个 25/16 不共用、不相加，写文档时不要当成同一轮的读数：
 
 | 脚本 | 格 | 断言数（实跑） |
 |---|---|---|
-| `tools/vm_downstream_bag.sh` | [1]阳性对照 + [2][3]录/取逐字段 + [4]不给 override + [4b]静音前置 + [5]回放回比 + [9b]收尾 | **PASS=12 FAIL=0 SKIP=1**（`diagnostic_aggregator` 那格因无 sudo 显式 SKIP） |
+| `tools/vm_downstream_bag.sh` | [1]阳性对照 + [2][3]录/取逐字段 + [4]不给 override + [6]聚合器七格 + [6b]告警传播三格 + [4b]静音前置 + [5]回放回比 + [9b]收尾 | **PASS=22 FAIL=0 SKIP=0**（[6]/[6b] 补上之前是 12 条 + 1 格显式 SKIP） |
 
 ## 最短复跑路径
 
@@ -71,6 +73,9 @@ POISON=1 POISON_LEVELS="mid" LOG=/tmp/dmp_mid bash tools/vm_lifecycle_compose.sh
 | `c11_shutdown_poison0.txt` | `POISON=0` 快档：[8] 六条与状态机十条，`PASS=16 FAIL=0`（[6][7] 按设计跳过，日志里有那行“跳过”声明） |
 | `e1_bag_run1_fail.txt` | 下游联动的**红的那一轮**（bytes=2487）：`PASS=6 FAIL=2 SKIP=1 PRED_OVERTURNED=1`，三条原始读数都在——预设 0 / 实测 141 批、`kill -INT` 后仍收 64 帧、回放回比 200 帧找不到 |
 | `e1_bag_run2_green.txt` | 改完之后的全绿轮（远端 `HEAD=0692751`，bytes=2522）：录 231 批 / 不给 override 144 批 / live 160–bag 308 逐字段 0 差异 / `deactivate` 后 3s 0 帧 / 回放 200 帧 0 找不到 / [9b] 0/0，`PASS=12 FAIL=0 SKIP=1` |
+| `e3_agg_run1_minebug.txt` | [6] 补上后的**第一轮**（bytes=3133）：`PASS=14 FAIL=4`，四格全在 [6] 且读数一句 `原始 0 项 / 聚合 0 项`—— 真因在 err 尾行：`ValueError: invalid literal for int() with base 10: b'\x00'`（rclpy 把 uint8 给成 bytes，回调打断 spin）。**原始侧也是 0** 才让我当场判定错在自己的探针，不是聚合栈没工作（素材录 B-50） |
+| `e3_agg_run2_green.txt` | 修完的全绿轮（远端 `HEAD=27a1cbb`，bytes=2997）：`PASS=19 FAIL=0 SKIP=0`，[6] 读数 `RAW_N=5 AGG_N=8 LINK_IN=1 CH_IN=4 CMP=5 MISMATCH=0 HW_KEEP=5`，探针侧 `raw_status=50 agg_status=80`。**这一轮当时被我当成“告警会沿诊断栈传播”的证据，而它不是**——见下面那行 |
+| `e3b_alarm_propagation_green.txt` | [6b] 补上后的全绿轮（远端 `HEAD=1a860a5`，bytes=3483）：`PASS=22 FAIL=0 SKIP=0`，[6b] 读数 `INJ_RAW_LVL=2 INJ_AGG_LVL=2 INJ_ACCEPT=1 RESTORE=1` —— 把一条阈值整段抬到现值之外后，**原始侧与聚合侧同时变成 Error(2)**（上面那个 `MISMATCH=0` 只是 0 对 0，证不到告警，素材录 B-52） |
 
 这些是**当时那一次**的输出原文（GBK/UTF-8 混排，控制台里可能显示成乱码，字节是对的），不是重新生成的摘要。
 表里的 `bytes=` 是**入库 blob 的字节数**（`git cat-file -s`）。这不是措辞问题而是实测：本机 `core.autocrlf=true`，

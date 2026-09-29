@@ -255,12 +255,13 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
 > 2026-09-29 补一笔：这张表的**方向**仍然成立，但**适用范围**被 e1 那一格收窄了 —— 它量的是
 > 手写订阅方，不是“任何下游”。见下面《e1 下游联动》。
 
-## e1 下游联动：让**生态组件**来消费我们的话题（12 条断言，2026-09-29 VM 实跑）
+## e1+e3 下游联动：让**生态组件**来消费我们的话题（22 条断言，2026-09-29 VM 实跑）
 
-自己写一个订阅节点收到数据，证明的只是“我的代码与我的代码能通”。这一轮换了个证人：`ros2 bag`
-（rosbag2，核心发行版组件，不看本项目一行代码）。脚本 `tools/vm_downstream_bag.sh`，远端
-`HEAD=0692751`、`BUILD_RC=0`，整轮 **PASS=12 FAIL=0 SKIP=1**（原始读数
-`tools/diagnostics/evidence/e1_bag_run2_green.txt`）。
+自己写一个订阅节点收到数据，证明的只是“我的代码与我的代码能通”。这一轮换了两个证人：`ros2 bag`
+（rosbag2，核心发行版组件）与 `diagnostic_aggregator`（标准诊断栈），两者都不看本项目一行代码。脚本
+`tools/vm_downstream_bag.sh`，远端 `HEAD=1a860a5`、`BUILD_RC=0`，整轮 **PASS=22 FAIL=0 SKIP=0**
+（e1 那轮是 `PASS=12 SKIP=1`；原始读数 `tools/diagnostics/evidence/e1_bag_run2_green.txt`、
+`e3_agg_run2_green.txt` 与 `e3b_alarm_propagation_green.txt`，连红的那两轮也一起入库）。
 
 | 格 | 断言 | 本轮实测 |
 |---|---|---|
@@ -271,10 +272,19 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
 | [4] | 预设格：不给 QoS override 直接录 | 144 批 —— **旧预设“静默零条”被推翻** |
 | [4b] | 回放前先 `deactivate` → `inactive`，这 3s 实时侧 0 帧 | `inactive` / 0 帧 |
 | [5] | 阳性对照 + `ros2 bag play` 的每一帧都能回到 bag 里逐字段相同 | 200 帧；找不到 0、字段不同 0 |
-| [9b] | 收尾收干净（不给下一轮埋跨轮污染） | 桥相关 0 个、sim/gateway 0 个（另在 VM 上用 `ps` 独立核过） |
-| [6] | `diagnostic_aggregator` 聚合 | **SKIP**：VM 上 sudo 需密码，装不上。SKIP 不是 PASS——本脚本对“告警沿标准诊断栈传播”这件事**没有任何证据** |
+| [9b] | 收尾收干净（不给下一轮埋跨轮污染） | 桥相关 0 个、sim/gateway 0 个、聚合器 0 个（另在 VM 上用 `ps` 独立核过） |
+| [6] | 图上只有一个 `/analyzers` 节点（谁在答，比答得对不对更早） | 1 个 |
+| [6] | `/diagnostics_toplevel_state` 在（外部监控就看这一个） | 在 |
+| [6] | 阳性对照：同窗两侧都非空 | 原始 5 项 / 聚合 8 项（多的 3 项是分组节点 `/DMP`、`/DMP/Link`、`/DMP/Channels`） |
+| [6] | `telemetry_link` 进了聚合结果 | 1 项 |
+| [6] | 通道项 `*_chN` 进了聚合结果 | 4 项（`TEMP_ch0`/`HR_ch1`/`CONC_ch3` …） |
+| [6] | 同名项 level 逐条一致 | 比了 5 条，不一致 0 条 |
+| [6] | 预设格：聚合不丢 `hardware_id` | 命中（HW_KEEP=5） |
+| [6b] | 阳性对照：把一条阈值整段抬到现值之外，**原始侧**那条必须变成非 OK | `INJ_RAW_LVL=2`（越界按 `levelFor` 就是 Error） |
+| [6b] | 同一个非 OK 出现在聚合侧且与原始侧同值 —— 这才是“告警沿标准诊断栈传出去” | `INJ_AGG_LVL=2`（服务走的是 `/dmp/<id>/set_rule`，不改固件不改网关代码） |
+| [6b] | 阈值恢复原值（不把改造过的现场留给后面几格） | `RESTORE=1` |
 
-三个口径上的讲究（都不是讲究，是踩出来的）：
+这些口径上的讲究（都不是讲究，是踩出来的；不写具体条数是因为它每轮都在长，一个过时的计数就是一个新的错读数）：
 
 - **比窗口不比整文件**。bag 录 16s、实时订阅方只盯 8s，`cmp -s` 两个 csv 会因边界不同**必然**不等，
   那是脚本自己的错，拿来当链路结论就是假红。判据改成：短侧每一行按 `seq` 在长侧都能找到且六字段全同。
@@ -287,6 +297,21 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
   （`on_activate`/`on_deactivate` 本来就管着那个定时器），“进程收干净”交给 [9b] 按名字收 + 数量读数。
   SIGINT 的退出语义在 `vm_lifecycle_compose.sh` 的 [8] 里已有正式断言，不在这里重复——
   **重复断言只会让两格谁红了分不清**。
+- **[6] 必须在桥 active 时跑**（所以它排在 [3] 之后、[4b] 之前）。`/diagnostics` 只在 activate 后才有，
+  而 [4b] 为了回放静音会把桥 `deactivate`——顺序写错的话这格收到的永远是超时项，那是脚本自己造成的假红。
+- **阳性对照要并列在两侧**。补 [6] 的第一轮四格全红，读数 `原始 0 项 / 聚合 0 项`，真因在 `err` 尾行：
+  rclpy 把 uint8 字段（`DiagnosticStatus.level`）给成**单字节 bytes**，`int(b'\x00')` 抛 ValueError，
+  异常从订阅回调里冒出去打断 `spin_once`。如果那一格只断言聚合侧，我会写下“`diagnostic_aggregator`
+  没收到我们的 `/diagnostics`”——一句关于生态工具的错结论（素材录 B-50）。
+- **接口先侦查再写断言**。参数文件顶层键就是 `analyzers`（节点名实测 `/analyzers`）、聚合输出 `/diagnostics_agg`，
+  而条目名是 `/DMP/Channels/CONC_ch3`——**不带**厂商 example 里那个空格，因为带不带取决于上游 `status.name`
+  自己，不是可依赖的约定（因而匹配只用“以原始 name 结尾”）。侦查脚本 `tools/diagnostics/vm_aggregator_probe.sh` 自己
+  也被阶段间残留污染过一次：`kill $!` 只杀掉 `ros2 run` 外壳，example 那两个节点照旧活着，
+  两个同名 `/analyzers` 都发同一个话题（素材录 B-51）。
+- **全绿不等于证到了。** [6] 那七条当场全绿，可我重读自己的措辞才发现：那一窗里**所有** level 都是 OK(0)，
+  所以“聚合前后 level 逐条一致”其实是 **0 对 0 的一致**——证不到“告警沿标准诊断栈传播”。因此补 [6b]：
+  用桥自己的 `set_rule` 把一条阈值抬到现值之外，拿到**两侧同时为 Error(2)** 那一格（素材录 B-52）。
+  代价很小，换来的是一句能说出口的主张与证据对齐。
 
 ## 顺手把 QoS 那条结论的**适用范围**收窄了
 
@@ -353,10 +378,11 @@ POSIX 的 `nfds` 必须是 **max_fd + 1**，传 0 等于"一个描述符都不�
   “某一台连接黑洞 ⇒ 单个回调阻塞数秒”正是靠它量出 mid 档 20.0× 的（见上面的 [6] 节）。
 - **错误隔离**：✅ 已验（见上面的 [7] 节，五条断言）。
 - **`on_shutdown`**：✅ 已验（见上面的 [8] 节，六条断言两档各一次）——ADR-003 原本挂着“未覆盖”的最后一条边界已闭合。
-- **下游联动**：✅ 做了一半——rosbag2（录 → 取 → 回放）12 条断言全过，见上面《e1 下游联动》。
+- **下游联动**：✅ 做了——换两位生态证人：rosbag2（录 → 取 → 回放）+ `diagnostic_aggregator`（聚合与告警传播），
+  整轮 22 条全过、`SKIP=0`，见上面《e1+e3 下游联动》。
   `/dmp/frames` → `topic_to_ptp`/`pose_broadcaster` 这类**消费型**联动仍未做：那是另一类主张
-  （要真接一个导航栈），不拿 bag 这轮的成绩冒充。
-- **标准诊断栈聚合**：卡在环境上——VM 上 sudo 需要密码，`ros-humble-diagnostic-aggregator` 装不了
-  （apt 有候选版本，只是没装）。[6] 那格现在显式 SKIP，**汇总行把 SKIP 单独说出来**。装上后的断言面：
-  `/diagnostics` 被 aggregator 按 analyzer plugin 分组，能在 `/diagnostics_agg` 上按设备名读到告警沿——
-  那才是“沿标准诊断栈传播”的证据，本轮没有。
+  （要真接一个导航栈），不拿 bag 与诊断栈这两轮的成绩冒充。
+- **标准诊断栈聚合**：✅ 已验（上面 [6] 七格 + [6b] 三格）。先前它卡在环境上（VM 上 sudo 需密码，`ros-humble-diagnostic-aggregator` 装不了），
+  装上后跑出的读数把当时写的那句预设**修正了一半**：原话是“能在 `/diagnostics_agg` 上按设备名读到告警沿”，
+  实测形状是**按 analyzer 的 path 分组**（`/DMP/Link`、`/DMP/Channels`），设备靠 `hardware_id` 分辨而不是靠名字里的设备段；
+  而“读到告警沿”在只有 OK 项的那一窗里**不算证据**，要把阈值真推过界拿到两侧同为 Error(2) 那格才行。
