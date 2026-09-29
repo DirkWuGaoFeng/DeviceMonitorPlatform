@@ -7,8 +7,9 @@ $root = 'E:\Work\McuProject\DeviceMonitorPlatform'
 $exe  = Join-Path $root 'build\gateway_service.exe'
 if (-not (Test-Path $exe)) { throw "未找到 $exe ，请先编译 (见 docs/真机链路-STM32到上位机.md 附录)" }
 
-# 释放 COM4: 停掉占用串口的工具进程 (monitor_serial / qt_monitor)
-foreach ($n in 'monitor_serial', 'qt_monitor') {
+# 释放 COM4: 停掉仍直连串口的工具 (monitor_serial)。
+# T1.2 后 qt_monitor 可选「网关 (TCP RAW)」经本机 9100 取数、不再占 COM4, 故不在此互杀名单内。
+foreach ($n in 'monitor_serial') {
     $p = Get-Process $n -ErrorAction SilentlyContinue
     if ($p) { Stop-Process -Id $p.Id -Force; "已停止 $n (pid=$($p.Id)) 释放 $Port" }
 }

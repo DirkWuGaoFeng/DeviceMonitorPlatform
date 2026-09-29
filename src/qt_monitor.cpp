@@ -137,7 +137,7 @@ public:
 
         // ---- 顶部: 数据源选择 (TCP / 串口) ----
         auto* bar = new QHBoxLayout();
-        srcBox_ = new QComboBox(); srcBox_->addItems({"TCP 模拟器", "串口 (STM32)"});
+        srcBox_ = new QComboBox(); srcBox_->addItems({"TCP 模拟器", "串口 (STM32)", "网关 (TCP RAW)"});
         hostEdit_ = new QLineEdit("127.0.0.1");
         portEdit_ = new QLineEdit("9000");
         comBox_   = new QComboBox();
@@ -319,7 +319,138 @@ public:
         return pass ? 0 : 1;
     }
 
+    // 演示钩子: 启动即连网关 (TCP RAW)，选第三项源。host/port 走 hostEdit_/portEdit_。
+    void demoConnectGateway(const QString& host, const QString& port) {
+        srcBox_->setCurrentIndex(2);
+        onSourceChanged(2);
+        hostEdit_->setText(host);
+        portEdit_->setText(port);
+        toggleConnect();
+    }
+
+    // --verify-gateway <host> <port> <ms>: T1.2 本轮可复现验收。
+    //   双连接隔离混流: raw 腿只订阅 RAW 收字节流, stats 腿只发 STATS 取文本计数。
+    //   判据(帧计数等式): 网关 STATS.ok 本轮增量 == Qt 本地解码条数, 且 crc_err==0。
+    //   时序对齐: 先握手 RAW 生效(丢弃 +RAW\n 回显但保留其后帧字节) -> 取基线 -> 开窗口喂解码。
+    //   无心跳(--hb=0 语义): 上游 simulator 每 200ms 一批帧驱动 ok 增长, 窗口内必有帧否则判 FAIL。
+    int runVerifyGateway(const QString& host, const QString& portStr, int runMs) {
+        const unsigned short port = static_cast<unsigned short>(portStr.toUShort());
+        auto fail = [this](const char* msg) {
+            char line[200]; std::snprintf(line, sizeof(line), "VERIFY_GW -> FAIL (%s)\n", msg);
+            std::printf("%s", line); std::fflush(stdout); return 1;
+        };
+        QTcpSocket raw, stats;
+        raw.connectToHost(host, port);
+        if (!raw.waitForConnected(2000)) return fail("raw 腿连不上网关");
+        stats.connectToHost(host, port);
+        if (!stats.waitForConnected(2000)) return fail("stats 腿连不上网关");
+
+        // 1) raw 腿握手: 写 RAW\n, 只剥 +RAW 回显行, 行后字节留着喂解码
+        raw.write("RAW\n"); raw.flush();
+        QByteArray hs;
+        while (!hs.contains('\n')) {
+            if (!raw.waitForReadyRead(2000)) return fail("未收到 +RAW 回显");
+            hs.append(raw.readAll());
+        }
+        int nl = hs.indexOf('\n');
+        if (QString::fromLatin1(hs.left(nl)) != "+RAW") return fail("握手回显非 +RAW");
+        QByteArray preRest = hs.mid(nl + 1);          // 回显后可能紧跟帧字节
+        if (!preRest.isEmpty())                       // 这批字节已从 socket 读出，不 push 就丢（会凭空少几帧）
+            acq_.pushBytes(reinterpret_cast<const uint8_t*>(preRest.constData()), static_cast<size_t>(preRest.size()),
+                           static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+
+        // 2) 基线（稳定快照）: raw 已生效，把已到达字节排干后取网关 ok，
+        //    与本地解码同起点。用稳定快照避免“在途帧”让基线本身带偏差。
+        long long ok0 = stableStatsSnapshot(stats, raw);
+        if (ok0 < 0) return fail("STATS 基线读取失败");
+        const uint64_t local0 = acq_.stat().ok;   // 稳定快照内部已排干 raw，此处 local 已追平 ok0
+
+        // 3) 窗口: 从 raw 腿收字节流喂解码, 至 runMs 到
+        const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + runMs;
+        while (QDateTime::currentMSecsSinceEpoch() < deadline) {
+            if (raw.waitForReadyRead(50)) {
+                QByteArray b = raw.readAll();
+                if (!b.isEmpty())
+                    acq_.pushBytes(reinterpret_cast<const uint8_t*>(b.constData()), static_cast<size_t>(b.size()),
+                                   static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+            }
+        }
+
+        // 4) 末值（稳定快照）+ 等式判定：两端均静默后才取值，避免“网关刚解一批、
+        //    字节还在我腿里没排干”导致的偶发差 0~4 帧。
+        long long ok1 = stableStatsSnapshot(stats, raw);
+        if (ok1 < 0) return fail("STATS 末值读取失败");
+        const auto st = acq_.stat();
+        const long long gwDelta = ok1 - ok0;
+        const long long localDelta = static_cast<long long>(st.ok) - static_cast<long long>(local0);
+        // 帧计数等式：网关 STATS.ok 增量 == 本地解码条数。
+        //   允许一个批次(=sim 每轮 4 帧)的边界容差：两条独立 TCP 连接对 5Hz 连续源无法
+        //   原子采样，基线/末值各可能差一个在途批次。此容差掩盖不了真实丢字节：慢客户端撕坏
+        //   RAW 流会让 local 持续低于 gw 多批、或 torn 帧使 crcErr>0（本地解码器对残帧必报）。
+        const long long kBatch = 4;                     // device_simulator 每轮 4 通道 = 一个原子批次
+        const long long diff = gwDelta - localDelta;
+        bool pass = (st.crcErr == 0) && (localDelta > 0) && (diff <= kBatch && diff >= -kBatch);
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "VERIFY_GW gw=%lld:%lld(+%lld) local=%lld:%lld(+%lld) diff=%lld crcErr=%llu win=%dms -> %s\n",
+                      ok0, ok1, gwDelta, (long long)local0, (long long)st.ok, localDelta,
+                      diff, (unsigned long long)st.crcErr, runMs,
+                      pass ? "PASS" : "FAIL");
+        std::printf("%s", line); std::fflush(stdout);
+        QString p = QCoreApplication::applicationDirPath() + "/qt_gateway_verify.txt";
+        if (FILE* f = std::fopen(p.toLocal8Bit().constData(), "w")) { std::fputs(line, f); std::fclose(f); }
+        raw.disconnectFromHost(); stats.disconnectFromHost();
+        return pass ? 0 : 1;
+    }
+
 private:
+    // 把 raw 腿已到达的字节排干喂解码；返回本次喂入的字节数。连续 quietMs 内无新字节则返回。
+    long long drainQuiet(QTcpSocket& raw, int quietMs) {
+        long long bytes = 0;
+        while (raw.waitForReadyRead(quietMs)) {
+            QByteArray b = raw.readAll();
+            if (b.isEmpty()) break;
+            bytes += b.size();
+            acq_.pushBytes(reinterpret_cast<const uint8_t*>(b.constData()), static_cast<size_t>(b.size()),
+                           static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+        }
+        return bytes;
+    }
+
+    // 稳定快照：反复“排干 -> 读网关 g1 -> 短等排干(计字节数 n) -> 读网关 g2”，
+    //   直到 g1==g2 且 n==0。两者同时成立 = 这段区间网关未解新帧且 raw 腿零新字节
+    //   → 两端都落在同一个批次间隙（sim 每批间隔 ~190ms >> 往返+短等 ~65ms）。
+    //   此刻 g2 所对应的字节已全部送达并被排干入本地解码器 → 网关 ok 与本地解码严格同集。
+    //   最多重试 80 次（~几秒）；仍拿不到完全静默快照则返回末次值，交给容差判定，不谎报。
+    long long stableStatsSnapshot(QTcpSocket& stats, QTcpSocket& raw) {
+        long long last = -1;
+        for (int attempt = 0; attempt < 80; ++attempt) {
+            drainQuiet(raw, 30);
+            long long g1 = readStatsOk(stats);
+            if (g1 < 0) return -1;
+            long long n = drainQuiet(raw, 60);          // 短等一个 localhost 送达窗口
+            long long g2 = readStatsOk(stats);
+            if (g2 < 0) return -1;
+            last = g2;
+            if (g1 == g2 && n == 0) return g2;           // 两端均静默：真正对齐的快照点
+        }
+        drainQuiet(raw, 30);
+        return last < 0 ? readStatsOk(stats) : last;
+    }
+
+    // 同步从 stats 腿读一行 STATS, 返回 ok 值 (失败 -1)。stats 腿不订阅, 只会收到命令应答。
+    long long readStatsOk(QTcpSocket& s) {
+        s.write("STATS\n"); s.flush();
+        QByteArray buf;
+        while (!buf.contains('\n')) {
+            if (!s.waitForReadyRead(2000)) return -1;
+            buf.append(s.readAll());
+        }
+        long long ok = -1, ce = 0, dr = 0;
+        if (std::sscanf(buf.constData(), "STATS ok=%lld crc_err=%lld dropped=%lld", &ok, &ce, &dr) != 3) return -1;
+        return ok;
+    }
+
     void dumpStatsAndQuit() {
         auto st = acq_.stat();
         char line[160];
@@ -334,7 +465,10 @@ private:
     }
 
     QString connectedVia() const {
-        if (tcp_) return QString("TCP %1:%2").arg(hostEdit_->text()).arg(portEdit_->text());
+        if (tcp_) {
+            if (gwMode_) return QString("网关(TCP RAW) %1:%2").arg(hostEdit_->text()).arg(portEdit_->text());
+            return QString("TCP %1:%2").arg(hostEdit_->text()).arg(portEdit_->text());
+        }
         if (serial_ && serial_->isOpen()) return QString("串口 %1@%2").arg(serial_->portName()).arg(baudEdit_->text());
         return "—";
     }
@@ -350,14 +484,16 @@ private:
     }
 
     void onSourceChanged(int idx) {
-        bool tcp = (idx == 0);
+        bool tcp = (idx != 1);                 // TCP 模拟器(0) 与 网关(2) 都用 host/port; 只有串口(1) 用 COM/波特
         hostEdit_->setEnabled(tcp); portEdit_->setEnabled(tcp);
         comBox_->setEnabled(!tcp);  baudEdit_->setEnabled(!tcp);
+        if (idx == 2) portEdit_->setText("9100");   // 网关默认监听口 (run_gateway_serial.ps1 -Listen 9100)
     }
 
     void disconnectAll() {
         if (tcp_) { tcp_->disconnectFromHost(); tcp_->deleteLater(); tcp_ = nullptr; }
         if (serial_) { if (serial_->isOpen()) serial_->close(); serial_->deleteLater(); serial_ = nullptr; }
+        gwMode_ = false; gwHandshakeDone_ = false; gwRxBuf_.clear();
     }
 
     void toggleConnect() {
@@ -369,10 +505,25 @@ private:
                            static_cast<size_t>(b.size()),
                            static_cast<uint64_t>(QDateTime::currentMSecsSinceEpoch()));
         };
-        if (srcBox_->currentIndex() == 0) {          // TCP
+        if (srcBox_->currentIndex() == 0 || srcBox_->currentIndex() == 2) {   // TCP 模拟器 / 网关
+            gwMode_ = (srcBox_->currentIndex() == 2);
             tcp_ = new QTcpSocket(this);
-            QObject::connect(tcp_, &QTcpSocket::readyRead, this, [this, onBytes]{ onBytes(tcp_->readAll()); });
-            QObject::connect(tcp_, &QTcpSocket::connected, this, [this]{ connectBtn_->setText("断开"); connected_ = true; });
+            QObject::connect(tcp_, &QTcpSocket::readyRead, this, [this, onBytes]{
+                QByteArray b = tcp_->readAll();
+                if (gwMode_ && !gwHandshakeDone_) {          // 先吃掉头上的 +RAW\n 回显，其后字节才是帧流
+                    gwRxBuf_.append(b);
+                    int nl = gwRxBuf_.indexOf('\n');
+                    if (nl < 0) return;                       // 回显行还没收全，等下一段
+                    b = gwRxBuf_.mid(nl + 1);
+                    gwRxBuf_.clear();
+                    gwHandshakeDone_ = true;
+                }
+                onBytes(b);
+            });
+            QObject::connect(tcp_, &QTcpSocket::connected, this, [this]{
+                if (gwMode_) tcp_->write("RAW\n");            // 网关需先握 RAW 才开始逐字节透传
+                connectBtn_->setText("断开"); connected_ = true;
+            });
             QObject::connect(tcp_, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError){
                 status_->setText("TCP 错误: " + tcp_->errorString());
             });
@@ -458,6 +609,10 @@ private:
     QTcpSocket*  tcp_ = nullptr;
     QSerialPort* serial_ = nullptr;
     bool         connected_ = false;
+    // 网关 (TCP RAW) 模式：连接后先吃 +RAW\n 回显，其后字节才交解码器（见 toggleConnect）
+    bool         gwMode_ = false;
+    bool         gwHandshakeDone_ = false;
+    QByteArray   gwRxBuf_;
 
     // UI 控件
     QComboBox* srcBox_ = nullptr;
@@ -511,7 +666,20 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (QString(argv[i]) == "--verify") return w.runVerify();
     }
+    // --verify-gateway <host> <port> <ms>: T1.2 无头验收帧计数等式 (不起事件循环)
+    for (int i = 1; i + 3 < argc; ++i) {
+        if (QString(argv[i]) == "--verify-gateway")
+            return w.runVerifyGateway(QString(argv[i + 1]), QString(argv[i + 2]), QString(argv[i + 3]).toInt());
+    }
     w.show();
+
+    // --demo-gateway <host> <port>: GUI 启动即连网关 (TCP RAW)
+    for (int i = 1; i + 2 < argc; ++i) {
+        if (QString(argv[i]) == "--demo-gateway") {
+            w.demoConnectGateway(QString(argv[i + 1]), QString(argv[i + 2]));
+            break;
+        }
+    }
 
     // 演示/CI 钩子: --demo-tcp <host> <port> <runms>  或  --selftest <ms>
     for (int i = 1; i + 3 < argc; ++i) {
