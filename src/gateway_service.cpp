@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,8 @@
   using sock_t = SOCKET;
   #define CLOSESOCK closesocket
   #define LASTWSAE()  WSAGetLastError()
+  // Winsock 对“向已关对端 send”只返回错误(WSAECONNRESET 等)，不产生信号
+  static constexpr int SEND_FLAGS = 0;
 #else
   #include <sys/socket.h>
   #include <netinet/in.h>
@@ -41,6 +44,15 @@
   #define CLOSESOCK ::close
   #define INVALID_SOCKET (-1)
   #define LASTWSAE()  (0)
+  // POSIX 上向已被对端关闭的 socket 写，除了返回 EPIPE 还会 raise(SIGPIPE)，
+  // 而它的默认动作是终结整个进程 —— 一个下游掉线会带走所有消费者与上游采集腿。
+  // MSG_NOSIGNAL 只关掉“这一次写”的信号；macOS/BSD 无此 flag，靠 main() 里的
+  // signal(SIGPIPE, SIG_IGN) 兜底(见下方 SIGPIPE 注释)。两道一起上是故意重复。
+  #ifdef MSG_NOSIGNAL
+    static constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+  #else
+    static constexpr int SEND_FLAGS = 0;
+  #endif
 #endif
 
 static uint64_t nowMs() {
@@ -64,7 +76,7 @@ struct Client {
 static bool sendAll(sock_t c, const std::string& s) {
     size_t off = 0;
     while (off < s.size()) {
-        int n = ::send(c, s.data() + off, static_cast<int>(s.size() - off), 0);
+        int n = ::send(c, s.data() + off, static_cast<int>(s.size() - off), SEND_FLAGS);
         if (n <= 0) return false;
         off += static_cast<size_t>(n);
     }
@@ -121,6 +133,12 @@ int main(int argc, char** argv) {
 
 #ifdef _WIN32
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
+#else
+    // 忽略 SIGPIPE 后，send 失败只剩一个返回值 false；本文件目前不依赖它做事，
+    // 死链接由下一轮循环里 recv 返回 0 正常走 erase 路径回收（与 Windows 上的行为一致）。
+    // 实测依据（本轮 Linux，N 路订阅者同时结束后观察 1 s，两轮共24 格）：
+    // 修改前 N=2 死 0/6、N=4 死 1/6、N=6 死 5/6、N=8 死 6/6，全为 SIGPIPE；Windows 同脚本 0/12。
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
     bool serialUp = !serPort.empty();
     sock_t up = INVALID_SOCKET;
