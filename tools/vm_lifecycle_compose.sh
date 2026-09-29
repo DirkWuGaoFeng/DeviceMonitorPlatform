@@ -533,10 +533,52 @@ if [ "$POISON" = "1" ]; then
   kill "$ILP" 2>/dev/null; pkill -f component_container 2>/dev/null; sleep 2
 fi
 
-echo "=== [8] 汇总 ==="
+echo "=== [8] on_shutdown: 转换回调与进程退出是**两条不同的路** ==="
+# 为什么必须单开一段: `on_shutdown` 只在**生命周期 SHUTDOWN 转换**里跑; 而 SIGINT 走的是
+# executor 的 spin() 返回 -> rclcpp::shutdown() -> return 0, 根本不经过这个回调。
+# 把两者混为一谈就会"测了进程能退"却以为"回调验过了" —— ADR-003 一直把这条列为未覆盖边界。
+# 这里直接起可执行文件(不经 launch), 才能拿到**节点自己的**退出码而不是包装进程的。
+pkill -f component_container 2>/dev/null; pkill -f bridge_node 2>/dev/null; sleep 2
+SHNODE=dmp_shutdown_probe
+./install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args \
+     -r __node:="$SHNODE" -p device_id:=bed01 -p gateway_host:=127.0.0.1 \
+     -p gateway_port:="$GW_PORT" > "$LOG/shutdown_node.log" 2>&1 & SHP=$!
+sleep 6
+timeout 30 ros2 lifecycle set /$SHNODE configure >/dev/null 2>&1
+timeout 30 ros2 lifecycle set /$SHNODE activate  >/dev/null 2>&1
+sleep 3
+# 阳性对照先立住: 不先证明"它在发", 后面那句"零批"就什么也证明不了 —— 那是一条永远为真的断言(素材录 B-27)。
+recorder 4 "$LOG/gap_pre_shutdown.json" >/dev/null 2>&1
+PRE_N=$(python3 -c "import json;print(sum(json.load(open('$LOG/gap_pre_shutdown.json'))['count'].values()))" 2>/dev/null)
+chk "shutdown 前它确实在发(否则后面的零批无意义) $PRE_N 批" "$(python3 -c "print(1 if ${PRE_N:-0}>10 else 0)")" "1"
+timeout 30 ros2 lifecycle set /$SHNODE shutdown 2>&1 | tail -1
+sleep 2
+chk "active -> shutdown 后状态确实是 finalized" \
+    "$(timeout 15 ros2 lifecycle get /$SHNODE 2>/dev/null | awk '{print $1}')" "finalized"
+chk "on_shutdown 回调真跑了(日志有'桥已静默')" \
+    "$(grep -c 'shutdown: 桥已静默' "$LOG/shutdown_node.log" 2>/dev/null)" "1"
+recorder 5 "$LOG/gap_after_shutdown.json" >/dev/null 2>&1
+POST_N=$(python3 -c "import json;print(sum(json.load(open('$LOG/gap_after_shutdown.json'))['count'].values()))" 2>/dev/null)
+chk "shutdown 后数据面静默(定时器与网关线程都停了) $POST_N 批" "${POST_N:-0}" "0"
+echo "  (话题仍在图上不矛盾: 对象要到 on_cleanup 才析构, 这一段走的是 active->shutdown 直跳 finalized)"
+# 退出码: 15s 内不退就算悬挂(网关读线程没 join 干净就是这个形状), 不给它"再多等一下"的机会。
+kill -INT "$SHP" 2>/dev/null
+GAVEUP=0
+for _si in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  kill -0 "$SHP" 2>/dev/null || break
+  sleep 1
+done
+RC=999
+if kill -0 "$SHP" 2>/dev/null; then GAVEUP=1; kill -9 "$SHP" 2>/dev/null; else wait "$SHP" 2>/dev/null; RC=$?; fi
+chk "SIGINT 后节点自行退出(15s 内, 不退就是悬挂线程)" "$GAVEUP" "0"
+chk "退出码=0(SIGINT 走的是 spin 返回这条路, 不是崩溃/被杀)" "$RC" "0"
+kill -9 "$SHP" 2>/dev/null; pkill -f bridge_node 2>/dev/null; sleep 2
+
+echo "=== [9] 汇总 ==="
 echo "  PASS=$PASS FAIL=$FAIL   (Q3 的状态机断言全部走这几个 PASS/FAIL, 不靠人眼看日志)"
 echo "  Q4 的结论不在这里: 它是一组毫秒数, 看上面 mt / st 两行自己比。"
 echo "  Q6/Q7 同上: [6] 的表格与 [7] 的 PASS/FAIL 才是结论, 本脚本不替它们说话。"
+echo "  [8] 只验 on_shutdown 回调与退出码两件事 —— 它们是两条不同的路, 不在一条断言里绑。"
 pkill -f component_container 2>/dev/null; pkill -f bridge_node 2>/dev/null
 kill "$GW" "$SIM" 2>/dev/null
 [ "$FAIL" -eq 0 ] && echo "ALL_LIFECYCLE_ASSERTS_PASS"

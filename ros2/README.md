@@ -106,7 +106,7 @@ ros2 launch dmp_ros2_bridge dmp_bridge_composed.launch.py devices:=bed01,bed02 m
 ```
 
 三个阶段各自可断言（`tools/vm_lifecycle_compose.sh` 的 [1] 段，c8 当时 **PASS=10 FAIL=0**；
-脚本后来又长了 [6] 毒化 A/B 与 [7] 错误隔离两段，现在整轮是 19 项，见本节末尾）：
+脚本后来又长了 [6] 毒化 A/B、[7] 错误隔离与 [8] `on_shutdown` 三段，现在整轮是 25 项，见本节末尾）：
 
 | 阶段 | 话题/服务 | 数据 | 写路径 |
 |---|---|---|---|
@@ -189,7 +189,21 @@ launch 层支持 per-device 端点覆盖（桥代码零改动），`connect` 改
 它自己的三个服务因 `configure` 没走完而不存在、bed02 的 `change_state` 仍在且能激活、另一台照发 40 批。
 结论：一个组件配置失败不传染同容器其它组件，也不拆容器。
 
-至此 ADR-003 未覆盖的边界只剩 `on_shutdown` 一条。
+### [8] `on_shutdown`：转换回调与进程退出是两条不同的路
+
+这一格原本是 ADR-003 里唯一挂着"未覆盖"的边界。要验它得先看清它是**两件事**，而它们的代码路径根本不重合：
+
+- `on_shutdown()` 只在生命周期 SHUTDOWN 转换里被调；它做的事是 `timers_.clear()` + 网关 `closeAll()`。
+- SIGINT 走的是另一条：`SingleThreadedExecutor::spin()` 返回 → `rclcpp::shutdown()` → `return 0`，
+  **一句 `on_shutdown` 都不经过**。所以"测了进程能退"绝不等于"回调验过了"。
+
+六条断言按这两条路分开设（直接起可执行文件而不是 `ros2 launch`，才能拿到**节点自己的**退出码）：
+阳性对照（shutdown 前 4s 窗口确实在发，否则后面那句"零批"永远为真）→ active→shutdown 后状态 `finalized`
+→ 日志里有回调那一句 → 5s 窗口数据面 0 批 → SIGINT 后 15s 内自行退出（不退就是悬挂线程，
+网关读线程没 join 干净正是这个形状）→ 退出码为 0。
+
+一个设计上得写清的点：`active->shutdown` 直跳 `finalized` 时话题仍在图上（publisher 对象要到
+`on_cleanup` 才析构），所以本段不断言图，只落在回调 + 数据面 + 退出码上。实跑结果见下一节末。
 
 ## QoS 事故复盘：我原来的假设是反的
 

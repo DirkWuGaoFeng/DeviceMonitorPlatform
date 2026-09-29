@@ -1,0 +1,60 @@
+# tools/diagnostics — 取证脚本与原始读数
+
+> 为什么这个目录存在：`docs/adr/ADR-003`、`ros2/README.md`、`docs/经典Bug素材录.md` 里引用了一批
+> **具体数字**（7 轮 A/B 的符号翻转、毒化实验的 4 轮重复表、图缓存那三格读数）。这些数字当初是在
+> 一个临时目录里跑出来的。如果脚本不入库，文档里的表就退化成"我说了算"——而这个项目从头到尾
+> 卖点恰恰是"可复现证据"。所以把**产出这些数字的脚本**和**当时的原始输出**一起放进来。
+
+## 前置条件
+
+- 一台 Ubuntu 22.04 + ROS2 Humble 的机器（本项目实测用 VM，`g++ 11.4`）。
+- 仓库在远端机器上的路径为 `~/RosProject/dmp`（各脚本里写死的就是这个；可用 `DMP_HOME` 覆盖的只有 `vm_sync_build.sh`）。
+- 先构建一次：`colcon build --base-paths ros2 --packages-select dmp_msgs dmp_ros2_bridge`，
+  以及 C++ 侧的 `./build_linux/{device_simulator,gateway_service}`（`vm_native_build.sh`）。
+- 下表里标 **VM 侧** 的脚本要在装了 ROS 的那台机器上跑；标 **Windows 侧** 的是从本机驱动远端。
+
+## 一览
+
+| 脚本 | 侧 | 干什么 | 产出对应文档里的哪张表 | 性质 |
+|---|---|---|---|---|
+| `vm_sync_build.sh` | VM | fetch bundle（**只允许 fast-forward**）+ `colcon build` + `colcon test`，并打 `VM_HEAD_BEFORE/HEAD/BUILD_RC` | 每次"VM 构建通过"那句话的来源 | 可复用 |
+| `run_vm_rounds.ps1` | Win | 从 Windows 打一条链：bundle → scp → 同步构建 → 跑指定轮次脚本 → 日志落文件 | — | 可复用（`DMP_VM_IP` 必填） |
+| `vm_poison_rounds.sh` | VM | 毒化实验：第 1 轮全档（含 21s 的 worst），第 2~4 轮 mid+fast 做重复 | ADR-003 末节之二的 **4 轮重复表** | 可复用 |
+| `vm_mid_rounds.sh` | VM | 连跑 2 轮 mid 档，带图诊断 | 「只有首轮干净」那个形状的复现 | 可复用 |
+| `vm_ground_rounds.sh` | VM | 连跑 2 轮 fast 档（验证"现场发现"这把新尺子） | [1] 由红转绿的对照 | 可复用 |
+| `vm_graph_probe.sh` | VM | **图缓存探针**：独立话题 `/dmp_probe_frame`，分别用优雅 TERM 与 SIGKILL 杀发布者，两路各读一次 | 素材录 B-40 的四格读数（TERM→0/0、SIGKILL→1/0、daemon stop→0/0） | 可复用（不碰被试话题） |
+| `vm_probeone.sh` | VM | 含 worst 档的**单轮原始配方**，脚本退出后 +0/15/30s 三次读两路、全程不碰 daemon | B-40 的定因读数、B-42 的"重跑一次" | 可复用 |
+| `vm_ab_probe.sh` | VM | 头阻塞 A/B，并发窗口 K 做成参数（H1 vs H2 两个假设对撞） | ADR-003 里被 7 轮 A/B 推翻的那段 | 一次性（K 扫描） |
+| `vm_ab_repeat.sh` | VM | 同一脚本不改一行重复 3 轮，只提 A/B 与队列行 | 「差值符号轮次间翻转」那条判据 | 可复用 |
+| `vm_diag_c8.sh` | VM | 为什么 active 期 recorder 得到 0 批、组件到底装上没有 | 素材录 B-01 / B-03 / B-07 那族"零数据" | 一次性诊断 |
+| `vm_check_verdict.sh` | VM | 不重跑整机验收，只验 `bash -n` + 那段动态结论行的 python | 素材录 B-35（结论行不许写死） | 可复用 |
+
+主验收脚本本身在上一级：`tools/vm_lifecycle_compose.sh`（[0]~[9]，含毒化 A/B、错误隔离、`on_shutdown`）。
+
+## 最短复跑路径
+
+```bash
+# 远端机器上, 仓库根目录:
+bash tools/vm_lifecycle_compose.sh                      # 全量(含 [6] 毒化与 [7] 隔离, 约 12 分钟)
+POISON=0 bash tools/vm_lifecycle_compose.sh             # 只要状态机+on_shutdown 断言(约 3 分钟)
+POISON=1 POISON_LEVELS="mid" LOG=/tmp/dmp_mid bash tools/vm_lifecycle_compose.sh
+```
+
+## 原始读数（`evidence/`）
+
+| 文件 | 内容 |
+|---|---|
+| `c8_abrepeat.txt` | 7 轮 A/B 的每轮 mt/st 两行与队列行（符号翻转那条判据的原始依据） |
+| `c9_runs.txt` | 毒化实验 4 轮（含修尺子后的重跑），每轮的表格 + `PASS=/FAIL=` |
+| `c9_ground.txt` / `c9_mid.txt` | fast×2 与 mid×2 轮，含 `图诊断` 两路读数行 |
+| `c9_probeone.txt` | 定因那一次：单轮（mid+worst）跑完后的 `+0s/+15s/+30s` 三行两路读数 |
+
+这些是**当时那一次**的输出原文（GBK/UTF-8 混排，控制台里可能显示成乱码，字节是对的），不是重新生成的摘要。
+复跑会得到新数字——尤其是绝对毫秒数会随机器变化；文档里能站住的是**同格配对比值**与符号分布，
+不是单次绝对值（素材录 B-36）。
+
+## 已知不完美
+
+- 标"一次性"的三个脚本依赖当时的 `/tmp` 现场（例如 `vm_diag_c8.sh` 假设前一轮日志还在），直接复跑可能只能拿到部分输出。它们留在仓库里的价值是**方法与踩坑点**，不是可重复的结论。
+- `vm_sync_build.sh` 里"HEAD 有没有真的前移"用的守卫是检查某个具体新文件存在，不是比较 commit——这是刻意的（已同步时比较 HEAD 会误报，见素材录 B-30）；代价是那个文件日后若改名，守卫要跟着改。
+- 远端地址一律不写死：`run_vm_rounds.ps1` 从环境变量 `DMP_VM_IP` 取，没设就直接退出。

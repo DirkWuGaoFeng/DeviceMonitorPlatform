@@ -1,0 +1,71 @@
+########## MID-ROUND 1 ##########
+RC=0 ELAPSED=534s
+  [鍥捐瘖鏂?[1]寮€澶碷 /dmp/frames: 鐜板満=0 daemon=0
+  [鍥捐瘖鏂?[1]寮€澶碷 瀹瑰櫒/妗? 46226 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [鍥捐瘖鏂?[1]寮€澶碷 鍏跺畠 ROS 鍙備笌鑰?python 璁㈤槄鏂?CLI): 
+  [鍥捐瘖鏂?[1]寮€澶碷 涓婁竴涓鍣ㄥ凡娲诲涔? 13 
+  PASS unconfigured 鏃?/dmp/frames 涓嶅湪 topic list (=0)
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 /dmp/frames: 鐜板満=0 daemon=0
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 瀹瑰櫒/妗? 46226 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 鍏跺畠 ROS 鍙備笌鑰?python 璁㈤槄鏂?CLI): 
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 涓婁竴涓鍣ㄥ凡娲诲涔? 93 
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3103 ms)
+  worst妗?= 10.255.255.1:9100 (21034 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=19 FAIL=0   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+ALL_LIFECYCLE_ASSERTS_PASS
+SCRIPT_DONE
+########## MID-ROUND 2 ##########
+RC=0 ELAPSED=533s
+  [鍥捐瘖鏂?[1]寮€澶碷 /dmp/frames: 鐜板満=0 daemon=0
+  [鍥捐瘖鏂?[1]寮€澶碷 瀹瑰櫒/妗? 47689 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [鍥捐瘖鏂?[1]寮€澶碷 鍏跺畠 ROS 鍙備笌鑰?python 璁㈤槄鏂?CLI): 
+  [鍥捐瘖鏂?[1]寮€澶碷 涓婁竴涓鍣ㄥ凡娲诲涔? 12 
+  PASS unconfigured 鏃?/dmp/frames 涓嶅湪 topic list (=0)
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 /dmp/frames: 鐜板満=0 daemon=0
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 瀹瑰櫒/妗? 47689 /home/dirk/RosProject/dmp/install/dmp_ros2_bridge/lib/dmp_ros2_bridge/bridge_node --ros-args -r __node:=dmp_bridge_bed01 -r __ns:=/ --params-file /tmp/lau
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 鍏跺畠 ROS 鍙備笌鑰?python 璁㈤槄鏂?CLI): 
+  [鍥捐瘖鏂?[4]cleanup鍚嶿 涓婁竴涓鍣ㄥ凡娲诲涔? 91 
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3110 ms)
+  worst妗?= 10.255.255.1:9100 (21052 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=19 FAIL=0   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+ALL_LIFECYCLE_ASSERTS_PASS
+SCRIPT_DONE
+MID_DONE

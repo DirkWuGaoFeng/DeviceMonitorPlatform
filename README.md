@@ -132,7 +132,7 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - ✅ **纯 C++ 控制台监控端** `monitor_console`（不依赖 Qt，端到端可跑）
 - ✅ **单元/集成测试** `tests/test_protocol.cpp`：**27 项断言全绿**（含 10 万元素 SPSC 多线程不丢不重）
 - ✅ **端到端冒烟**：`device_simulator` ↔ `monitor_console` 经 TCP 实测 ok 递增、crcErr=0、drop=0
-- ✅ **数据持久化**：`include/dmp/storage.h`（CsvSink 落盘 / loadCsv 回放 / TeeSink 扇出）+ `monitor_console --csv <file>` 导出 + `tests/test_storage.cpp` **35 断言全绿**（含 帧→解码→采集→CSV→回放 确定性集成）
+- ✅ **数据持久化**：`include/dmp/storage.h`（CsvSink 落盘 / loadCsv 回放 / TeeSink 扇出）+ `monitor_console --csv <file>` 导出 + `tests/test_storage.cpp` **36 断言全绿**（含 帧→解码→采集→CSV→回放 确定性集成；数字以运行时打印为准——源码 CHECK 行数不等于执行次数）
 - ✅ **真实 MCU 数据源（固件侧）**：`firmware/dmp_frame_core.{h,c}` 纯 C 帧内核（无 HAL 依赖）+ `dmp_frame.{h,c}` USART1 发送 glue + 合成采样 `dmp_task()`；`firmware/README.md` 给出并入 Keil 工程的 4 步
 - ✅ **上位机裸串口端**：`src/monitor_serial.cpp`（CreateFile 打开 COMx→读原始字节→`dmp::Acquisition` 解码→告警/CSV），Windows 编译通过 + 错误路径已验
 - ✅ **协议一致性（关键正确性）**：`tests/test_frame_parity.cpp` **41 断言全绿**——固件 C 内核与上位机 C++ `encodeFrame/FrameDecoder` **逐字节相等** + 交叉解帧 + 金标准帧（CRC/浮点小端/seq 小端）

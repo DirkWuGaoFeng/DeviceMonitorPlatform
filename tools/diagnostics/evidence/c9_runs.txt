@@ -1,0 +1,128 @@
+########## ROUND 1 (levels=fast mid worst) ##########
+RC=0 ELAPSED=825s
+  PASS unconfigured 鏃?/dmp/frames 涓嶅湪 topic list (=0)
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3094 ms)
+  worst妗?= 10.255.255.1:9100 (21054 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  鏍?            瀹瑰櫒        闄愭椂     妗ｄ綅         鍩虹嚎gap     鍙楁瘨gap     閫熺巼姣?     鎵?s鈫?   瓒呮椂娆?  mid_st_old    false     0      mid        200.9    6228.8    20.0x  5.00->0.25       0
+  mid_mt_old    true      0      mid        250.0     250.1     1.0x  5.00->5.00       0
+  mid_st_new    false     1000   mid        219.3    2002.1     3.0x  5.00->1.64      26
+  mid_mt_new    true      1000   mid        200.8     274.3     1.0x  5.00->5.00      25
+  fast_st_old   false     0      fast       281.0     302.4     1.0x  5.00->5.00       0
+  fast_mt_new   true      1000   fast       250.4     259.8     1.0x  5.00->5.00       0
+  worst_st_old  false     0      worst      200.5   鏍锋湰涓嶈冻   235.8x  5.12->0.02       0  [鍗犲埌鏃犳硶搴旂瓟鏌ヨ] 杩炵姸鎬侀兘璇讳笉鍒?鈥斺€?杩欐湰韬氨鏄湰鏍肩殑璇绘暟
+  worst_st_new  false     1000   worst      250.1    2003.6     5.5x  5.00->0.91      51
+  涓ゆ牸閮芥湁閰嶅鍩虹嚎, mid 妗ｅ彲浠ヤ笅缁撹(鏁板瓧瑙佷笂琛? 褰掑洜闇€瑕侀噸澶嶈疆娆?鈥斺€?瑙?ADR-003 鐨勭鍙峰垎甯冨仛娉?銆?  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=19 FAIL=0   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+ALL_LIFECYCLE_ASSERTS_PASS
+########## ROUND 2 (levels=mid fast) ##########
+RC=0 ELAPSED=599s
+  FAIL unconfigured 鏃?/dmp/frames 涓嶅湪 topic list: 瀹為檯=1 鏈熸湜=0
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3086 ms)
+  worst妗?= 10.255.255.1:9100 (21047 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  鏍?            瀹瑰櫒        闄愭椂     妗ｄ綅         鍩虹嚎gap     鍙楁瘨gap     閫熺巼姣?     鎵?s鈫?   瓒呮椂娆?  mid_st_old    false     0      mid        201.3    6227.0    20.0x  5.00->0.25       0
+  mid_mt_old    true      0      mid        204.3     250.1     1.0x  5.00->5.00       0
+  mid_st_new    false     1000   mid        250.0    2001.7     3.1x  5.00->1.61      26
+  mid_mt_new    true      1000   mid        200.7     249.8     1.0x  5.00->5.00      25
+  fast_st_old   false     0      fast       231.5     249.9     1.0x  5.00->5.00       0
+  fast_mt_new   true      1000   fast       200.9     249.6     1.0x  5.12->5.00       0
+  涓ゆ牸閮芥湁閰嶅鍩虹嚎, mid 妗ｅ彲浠ヤ笅缁撹(鏁板瓧瑙佷笂琛? 褰掑洜闇€瑕侀噸澶嶈疆娆?鈥斺€?瑙?ADR-003 鐨勭鍙峰垎甯冨仛娉?銆?  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=18 FAIL=1   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+########## ROUND 3 (levels=mid fast) ##########
+RC=0 ELAPSED=592s
+  FAIL unconfigured 鏃?/dmp/frames 涓嶅湪 topic list: 瀹為檯=1 鏈熸湜=0
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3061 ms)
+  worst妗?= 10.255.255.1:9100 (21053 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  鏍?            瀹瑰櫒        闄愭椂     妗ｄ綅         鍩虹嚎gap     鍙楁瘨gap     閫熺巼姣?     鎵?s鈫?   瓒呮椂娆?  mid_st_old    false     0      mid        250.4    6226.7    20.0x  5.00->0.25       0
+  mid_mt_old    true      0      mid        201.1     250.4     1.0x  5.00->5.00       0
+  mid_st_new    false     1000   mid        280.8    1999.6     3.0x  5.00->1.68      26
+  mid_mt_new    true      1000   mid        250.0     268.2     1.0x  5.00->5.00      25
+  fast_st_old   false     0      fast       219.3     250.7     1.0x  5.12->5.00       0
+  fast_mt_new   true      1000   fast       201.1     250.1     1.0x  5.00->5.00       0
+  涓ゆ牸閮芥湁閰嶅鍩虹嚎, mid 妗ｅ彲浠ヤ笅缁撹(鏁板瓧瑙佷笂琛? 褰掑洜闇€瑕侀噸澶嶈疆娆?鈥斺€?瑙?ADR-003 鐨勭鍙峰垎甯冨仛娉?銆?  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=18 FAIL=1   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+########## ROUND 4 (levels=mid fast) ##########
+RC=0 ELAPSED=596s
+  FAIL unconfigured 鏃?/dmp/frames 涓嶅湪 topic list: 瀹為檯=1 鏈熸湜=0
+  PASS unconfigured 鏃惰嚜鐮旀湇鍔′笉鍦?service list (=0)
+  PASS change_state 鏈嶅姟鍦?(=1)
+  PASS state=inactive (=inactive)
+  PASS configure 鍚?/dmp/frames 鍑虹幇 (=1)
+  PASS inactive 闆舵暟鎹?瀹堝崼鐢熸晥, 涓嶆槸纰板阀) (=0)
+  PASS state=active (=active)
+  PASS active 鏈夋暟鎹?(=30 鎵?
+  PASS deactivate 鍚庡啀娆￠浂鏁版嵁(璇佹槑鐘舵€佹満涓嶆槸鍙仛涓€娆℃€у惎鍔? (=0)
+  PASS cleanup 鍚?/dmp/frames 鍐嶆秷澶?on_cleanup 鐪熼噴鏀句簡 publisher) (=0)
+  mid  妗?= 192.168.109.253:9100 (3106 ms)
+  worst妗?= 10.255.255.1:9100 (21028 ms)
+  fast 妗?= 127.0.0.1:19999 (0 ms, 瀵圭収缁?
+  鏍?            瀹瑰櫒        闄愭椂     妗ｄ綅         鍩虹嚎gap     鍙楁瘨gap     閫熺巼姣?     鎵?s鈫?   瓒呮椂娆?  mid_st_old    false     0      mid        249.9    6228.8    20.0x  5.00->0.25       0
+  mid_mt_old    true      0      mid        204.8     249.9     1.0x  5.00->4.96       0
+  mid_st_new    false     1000   mid        280.1    1220.8     3.3x  5.00->1.54      26
+  mid_mt_new    true      1000   mid        250.1     250.4     1.0x  5.00->5.00      25
+  fast_st_old   false     0      fast       246.9     249.7     1.0x  5.00->5.00       0
+  fast_mt_new   true      1000   fast       241.1     264.0     1.0x  5.00->5.00       0
+  涓ゆ牸閮芥湁閰嶅鍩虹嚎, mid 妗ｅ彲浠ヤ笅缁撹(鏁板瓧瑙佷笂琛? 褰掑洜闇€瑕侀噸澶嶈疆娆?鈥斺€?瑙?ADR-003 鐨勭鍙峰垎甯冨仛娉?銆?  PASS 闄愭椂妗?ct>0)鐨勬棩蹇楅噷纭湁'connect 瓒呮椂绱'(淇鎸傚湪娲昏矾寰勪笂) 澶辨牸=0 (=0)
+  PASS 涓嶉檺鏃舵。(ct=0)鐨勮秴鏃惰鏁板繀椤讳负 0(瀵圭収缁勬病琚薄鏌? 澶辨牸=0 (=0)
+  PASS 姣忎竴鏍肩殑 bed01 瑕佷箞鐪熸縺娲讳簡, 瑕佷箞琚崰鍒拌涓嶅埌鐘舵€?澶辨牸=0 (=0)
+  PASS 姣忎竴鏍奸兘鍙栧埌閰嶅鍩虹嚎 澶辨牸=0 (=0)
+  PASS bed01 琚嫆鍚庡仠鍦?unconfigured(涓嶆槸涓€璺帹鍒?active) (=unconfigured)
+  PASS bed01 澶辫触娌℃瘉瀹瑰櫒: 瀹瑰櫒杩涚▼杩樺湪 (=1)
+  PASS bed01 澶辫触鍚庡畠鐨勪笁涓湇鍔＄‘瀹炰笉瀛樺湪(configure 娌¤蛋瀹屽氨娌″缓) (=0)
+  PASS bed01 澶辫触涓嶄紶鏌? bed02 鐨?change_state 浠嶅湪涓旇兘婵€娲?(=active)
+  PASS 涓€鍙伴厤缃け璐? 鍙︿竴鍙扮収鍙?40 鎵?
+  PASS=18 FAIL=1   (Q3 鐨勭姸鎬佹満鏂█鍏ㄩ儴璧拌繖鍑犱釜 PASS/FAIL, 涓嶉潬浜虹溂鐪嬫棩蹇?
+ROUNDS_DONE
