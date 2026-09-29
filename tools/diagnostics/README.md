@@ -73,6 +73,10 @@ POISON=1 POISON_LEVELS="mid" LOG=/tmp/dmp_mid bash tools/vm_lifecycle_compose.sh
 | `e1_bag_run2_green.txt` | 改完之后的全绿轮（远端 `HEAD=0692751`，bytes=2522）：录 231 批 / 不给 override 144 批 / live 160–bag 308 逐字段 0 差异 / `deactivate` 后 3s 0 帧 / 回放 200 帧 0 找不到 / [9b] 0/0，`PASS=12 FAIL=0 SKIP=1` |
 
 这些是**当时那一次**的输出原文（GBK/UTF-8 混排，控制台里可能显示成乱码，字节是对的），不是重新生成的摘要。
+表里的 `bytes=` 是**入库 blob 的字节数**（`git cat-file -s`）。这不是措辞问题而是实测：本机 `core.autocrlf=true`，
+旧证据在 Windows 工作区早就是 CRLF（`c11_full_poison1.txt` blob 9472 / 工作区 9582，`c9_runs.txt` 11209 / 11337），
+而 e1 那两份因为是 scp 直接落盘还没重新 checkout 过，恰好还是 LF。现在 `.gitattributes` 把
+`evidence/*.txt` 钉成 `text eol=lf`，证据在任何机器上逐字节一致（素材录 B-49 同族第二例）。
 复跑会得到新数字——尤其是绝对毫秒数会随机器变化；文档里能站住的是**同格配对比值**与符号分布，
 不是单次绝对值（素材录 B-36）。
 

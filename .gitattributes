@@ -25,3 +25,7 @@ CMakeLists.txt text eol=lf
 # 二进制/产物不入库，显式声明以防误判
 *.png  binary
 *.db   binary
+
+# 取证原文: 入库后必须逐字节不变（文档里写的 bytes= 是 blob 大小;
+# 若允许 autocrlf 在 checkout 时转 CRLF, 同一份证据在两台机器上会有两个字节数）
+tools/diagnostics/evidence/*.txt text eol=lf
