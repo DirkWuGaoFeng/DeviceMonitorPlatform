@@ -312,7 +312,9 @@ PY
 pick_poison() {  # pick_poison <名字> <期望区间 lo,hi(ms)> <候选 host:port 列表> -> 全局 POISON_<名字> / MS_<名字>
   local name=$1 band=$2 cands=$3 lo hi c el oc
   lo=$(echo "$band" | cut -d, -f1); hi=$(echo "$band" | cut -d, -f2)
-  POISON_$name=""; MS_$name=0
+  # bash 里 `POISON_$name=''` 不成立: 赋值号左边的名字不能靠展开构造, 整串会被当命令执行
+  # (现象是两句 command not found, 而变量**没被清空** —— 上一档选中的值会漏到下一档)。
+  eval "POISON_$name=''; MS_$name=0"
   for c in $cands; do
     read -r el oc <<< "$(poison_probe "${c%%:*}" "${c##*:}")"
     el=${el#elapsed_ms=}; [ -z "$el" ] && el=0
@@ -348,8 +350,10 @@ fi
 read -r FAST_MS _ <<< "$(poison_probe 127.0.0.1 19999)"; FAST_MS=${FAST_MS#elapsed_ms=}
 echo "  fast 档 = $FAST_EP (${FAST_MS:-?} ms, 对照组)"
 
-# 采样窗口必须**跨过半次阻塞**才测得到 gap: 一个 21s 的停顿落在 14s 的窗口里,
-# 只会得到"0 批", 而"0 批"与"容器没起来""QoS 不匹配"是同一个可观测现象 —— 分不开就是假结论。
+# 采样窗口长度由**实测阻塞时长**算, 因为固定 14s 遇到 21s 停顿只会得到"0 批",
+# 而"0 批"与"容器没起来""QoS 不匹配"是同一个可观测现象 —— 分不开就是假结论。
+# (但跑到本轮才知道这不是全部: 真正被毒死时占空比接近 100%, 46s 窗口里也只有 1 批,
+#  而**只有 1 个样本就算不出间隔**。所以下面的表把"批数速率"当主统计量, gap 当辅助。)
 poison_dur() { python3 -c "print(max(20, min(75, int(${1:-0}/1000) + 25)))"; }
 
 add_cell() {  # add_cell <level> <tag> <mt> <conn_timeout_ms> <endpoint> <实测时长ms>
@@ -357,11 +361,18 @@ add_cell() {  # add_cell <level> <tag> <mt> <conn_timeout_ms> <endpoint> <实测
   # 守的是**端点**(第 5 个), 不是容器类型: 目标没找到时端点是空的, 这时必须整格不跑。
   # 跑一个空端点会得到"毒化没影响"的读数, 而那其实是"什么都没毒到"。
   [ -z "$5" ] && return 0
-  printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$(poison_dur "$6")" >> "$LOG/poison_cells.txt"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$(poison_dur "$6")" "${6:-0}" \
+    >> "$LOG/poison_cells.txt"
 }
 
-poison_cell() {  # poison_cell <tag> <mt> <ct> <ep> <level> <dur秒>
+poison_cell() {  # poison_cell <tag> <mt> <ct> <ep> <level> <dur秒> <阻塞秒>
   local tag=$1 mt=$2 ct=$3 ep=$4 level=$5 dur=$6
+  local bs=${7:-2}; [ "$bs" -lt 2 ] && bs=2
+  # 生命周期命令的预算必须跟着**阻塞时长**缩放, 不能写死 20/40/90:
+  # 首跑就是被自己绊了一跤 —— 单线程容器被 21s 的回调占满时, 连
+  # `timeout 20 ros2 lifecycle get` 都无人应答, 于是状态被记成 unknown,
+  # 看起来像"毒化没跑", 实际恰恰是"毒得连问一句话都排不上队"。
+  local tcfg=$(( 30 + 3 * bs )) tact=$(( 30 + 2 * bs )) tq=$(( 15 + bs ))
   pkill -f component_container 2>/dev/null; sleep 2
   local args="devices:=bed01,bed02 mt:=$mt gateway_port:=$GW_PORT connect_timeout_ms:=$ct"
   [ "$ep" != "none" ] && args="$args gw_overrides:=bed01=$ep"
@@ -374,17 +385,19 @@ poison_cell() {  # poison_cell <tag> <mt> <ct> <ep> <level> <dur秒>
   sleep 2
   recorder 8 "$LOG/pgap_${tag}_base.json" 400 >/dev/null 2>&1     # 配对基线: 同容器, bed01 还没激活
   # 上面那句是本档能不能下结论的**前提**: 没有基线就没有差值, 只有基线才谈得上"被拖住"。
-  timeout 90 ros2 lifecycle set /dmp_bridge_bed01 configure >/dev/null 2>&1
-  timeout 60 ros2 lifecycle set /dmp_bridge_bed01 activate  >/dev/null 2>&1
+  timeout "$tcfg" ros2 lifecycle set /dmp_bridge_bed01 configure >/dev/null 2>&1
+  timeout "$tact" ros2 lifecycle set /dmp_bridge_bed01 activate  >/dev/null 2>&1
   recorder "$dur" "$LOG/pgap_${tag}_poison.json" 400 >/dev/null 2>&1
   local b1 st tmo_raw tmo_max
-  b1=$(timeout 20 ros2 lifecycle get /dmp_bridge_bed01 2>/dev/null | awk '{print $1}')
+  b1=$(timeout "$tq" ros2 lifecycle get /dmp_bridge_bed01 2>/dev/null | awk '{print $1}')
   # 计数只取 bed01 那一路的日志: 两路共用同一条 WARN 文案, 不过滤就会把别人的 0 当成我的 0。
   tmo_raw=$(grep 'dmp_bridge_bed01' "$LOG/poison_$tag.log" 2>/dev/null | grep -c 'connect 超时累计')
   tmo_max=$(grep 'dmp_bridge_bed01' "$LOG/poison_$tag.log" 2>/dev/null \
             | grep -o 'connect 超时累计 [0-9]*' | grep -o '[0-9]*$' | sort -n | tail -1)
-  st="${b1:-unknown}"
-  echo "$tag|$mt|$ct|$ep|$level|$st|${tmo_raw:-0}|${tmo_max:-0}" >> "$LOG/poison_result.txt"
+  # 状态读不到时记成 probe_timeout 而不是 unknown: 它本身就是一条读数(容器被占到无法应答查询),
+  # 与"读了但不对"必须可区分 —— 否则下一轮又要把两者当同一件事查。
+  st="${b1:-probe_timeout}"
+  echo "$tag|$mt|$ct|$ep|$level|$st|${tmo_raw:-0}|${tmo_max:-0}|8|$dur" >> "$LOG/poison_result.txt"
   kill "$lp" 2>/dev/null; pkill -f component_container 2>/dev/null; sleep 2
 }
 
@@ -397,9 +410,9 @@ if [ "$POISON" = "1" ]; then
   add_cell fast fast_mt_new true  1000 "$FAST_EP"      0
   add_cell worst worst_st_old false 0   "$POISON_worst" "${MS_worst:-0}"
   add_cell worst worst_st_new false 1000 "$POISON_worst" "${MS_worst:-0}"
-  while IFS='|' read -r level tag mt ct ep dur; do
-    echo "  --- 格 $tag (容器=$mt, connect_timeout_ms=$ct, 毒化=$ep, 窗口=${dur}s) ---"
-    poison_cell "$tag" "$mt" "$ct" "$ep" "$level" "$dur"
+  while IFS='|' read -r level tag mt ct ep dur ems; do
+    echo "  --- 格 $tag (容器=$mt, connect_timeout_ms=$ct, 毒化=$ep, 阻塞≈$(( ems / 1000 ))s, 窗口=${dur}s) ---"
+    poison_cell "$tag" "$mt" "$ct" "$ep" "$level" "$dur" "$(( ems / 1000 ))"
   done < "$LOG/poison_cells.txt"
 
   python3 - "$LOG" <<'PY'
@@ -410,24 +423,40 @@ for ln in open(f"{D}/poison_result.txt"):
     p = ln.strip().split('|')
     if len(p) == 8:
         cells[p[0]] = dict(zip(('tag','mt','ct','ep','level','state','tmo_raw','tmo'), p))
+    elif len(p) == 10:
+        d = dict(zip(('tag','mt','ct','ep','level','state','tmo_raw','tmo','bdur','pdur'), p))
+        cells[p[0]] = d
 def g(tag, which, key, dflt):
     try:
         j = json.load(open(f"{D}/pgap_{tag}_{which}.json"))
         return j[key].get('bed02', dflt)
     except Exception:
         return dflt
-print("  每格只报本轮读数(bed02 侧, 单位 ms); 基线与受毒是**同一次运行内的配对差** —— 跨格比较无效(B-36):")
-print("  %-13s %-9s %-6s %-6s %9s %9s %8s %7s %6s %5s" % (
-    "格", "容器", "限时", "档位", "基线gap", "受毒gap", "差值", "倍数", "批数", "超时次"))
+print("  每格只报本轮读数(bed02 侧); 基线与受毒是**同一次运行内的配对**, 配对差之外不可比(B-36):")
+print("  主统计量是**批数速率**(它永远有定义); 最大间隔只当辅助 ——")
+print("  它至少要两个样本才算得出来, 而真被毒死时整个窗口只到 1 批, 那就是无定义。")
+print("  无定义时旧版会把 0.0ms 当成一个数打印, 读起来就像“毫无影响” —— 那是比写死结论更阴的错。")
+print("  %-13s %-9s %-6s %-6s %9s %9s %7s %9s %6s" % (
+    "格", "容器", "限时", "档位", "基线gap", "受毒gap", "速率比", "批/s→", "超时次"))
 for c in cells.values():
     q = g(c['tag'], 'base', 'max_gap_ms', 0.0); b = g(c['tag'], 'poison', 'max_gap_ms', 0.0)
     qn = g(c['tag'], 'base', 'count', 0); bn = g(c['tag'], 'poison', 'count', 0)
+    # 速率用两个窗口各自的实际秒数归一(它们不等长!), 直接比批数会把"28s 窗口"当成"46s 窗口"。
+    bd = float(c.get('bdur') or 8); pd = float(c.get('pdur') or 25)
+    qrate, prate = qn / bd, bn / pd
+    ratio = (qrate / prate) if prate > 0 else float('inf')
+    # gap 只在两边都算得出时才有意义; 受毒侧样本不足时明写, 不留一个看似正常的 0.0。
+    btxt = ('%9.1f' % b) if bn >= 2 else '  样本不足'
+    rtxt = ('%7.1fx' % ratio) if ratio != float('inf') else '   全饿死'
     warn = ''
-    if c['state'] != 'active': warn = '  [实验无效] bed01 没激活, 毒化根本没跑'; bn = -1
-    elif qn < 10:              warn = '  [实验无效] 基线就只有 %d 批, 容器/订阅不健康' % qn
-    print("  %-13s %-9s %-6s %-6s %9.1f %9.1f %+8.1f %8s %4d->%-3d %5s%s" % (
-        c['tag'], c['mt'], c['ct'], c['level'], q, b, b - q,
-        ('%.1fx' % (b / q)) if q > 0 else '-', qn, bn, c['tmo'], warn))
+    if c['state'] == 'probe_timeout':
+        warn = '  [占到无法应答查询] 连状态都读不到 —— 这本身就是本格的读数'
+    elif c['state'] != 'active':
+        warn = '  [实验无效] bed01 未激活(%s), 毒化根本没跑' % c['state']
+    elif qn < 10:
+        warn = '  [实验无效] 基线就只有 %d 批, 容器/订阅不健康' % qn
+    print("  %-13s %-9s %-6s %-6s %9.1f %s %s %5.2f->%-5.2f %6s%s" % (
+        c['tag'], c['mt'], c['ct'], c['level'], q, btxt, rtxt, qrate, prate, c['tmo'], warn))
 # 本轮能不能下结论, 由上面的数据判, 不由这段脚本里写死的句子判。
 mid = {t: c for t, c in cells.items() if c['level'] == 'mid' and c['state'] == 'active'}
 if {'mid_st_old', 'mid_mt_old'} <= set(mid):
@@ -442,8 +471,10 @@ PY
   chk "限时档(ct>0)的日志里确有'connect 超时累计'(修复挂在活路径上) 失格=$BAD_NEW" "$BAD_NEW" "0"
   BAD_OLD=$(awk -F'|' '$3+0==0 && $5=="mid" && $8+0>0' "$LOG/poison_result.txt" | wc -l)
   chk "不限时档(ct=0)的超时计数必须为 0(对照组没被污染) 失格=$BAD_OLD" "$BAD_OLD" "0"
-  NOTACT=$(awk -F'|' '$6!="active" && $5!=""' "$LOG/poison_result.txt" | wc -l)
-  chk "每一格的 bed01 都真激活了(否则毒化没跑, 那张表全是空的) 失格=$NOTACT" "$NOTACT" "0"
+  NOTACT=$(awk -F'|' '$5!="" && $6!="active" && $6!="probe_timeout"' "$LOG/poison_result.txt" | wc -l)
+  # probe_timeout **不算失格**: 那是"容器被占到连一句查询都无人应答"的读数, 是现象不是事故。
+  # 但 unconfigured/inactive 必须算失格 —— 那才是"毒化根本没跑", 整张表都是空的。
+  chk "每一格的 bed01 要么真激活了, 要么被占到读不到状态 失格=$NOTACT" "$NOTACT" "0"
   NOBASE=$(awk -F'|' '{print $1}' "$LOG/poison_result.txt" | while read -r t; do
              python3 -c "import json;print(0 if sum(json.load(open('$LOG/pgap_${t}_base.json'))['count'].values())>=10 else 1)" 2>/dev/null
            done | awk '{s+=$1} END{print s+0}')
