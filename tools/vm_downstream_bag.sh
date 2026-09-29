@@ -12,10 +12,10 @@
 #   少 [1] 则 [2] 的"零条"永远为真(素材录 B-27); 少 [3] 则"存进去了"不等于"取出来还是它"。
 #
 # [4] 是一格**预设了再跑**的对照: 不给 QoS override 直接 ros2 bag record。
-#   预设(写完先按住): rosbag2 默认以 reliable 订阅, 而桥默认发 best_effort(sensor) ——
+#   跑之前的预设(摁住不动): rosbag2 默认以 reliable 订阅, 而桥默认发 best_effort(sensor) ——
 #   按本项目实测过的错配方向(素材录 B-07 的四格矩阵), 应当是**静默零条**。
-#   如果这格报 FAIL(收到了数据), 说明 Humble 的 rosbag2 会自己探测发布端 QoS, 那是**新事实**,
-#   要改文档而不是改断言。
+#   2026-09-29 首跑实测 141 批: **预设被推翻**。Humble 的 rosbag2 会查发布端 offered QoS 并
+#   自建兼容订阅 —— 生态工具比我手写的订阅方聪明。新预设与证据都在[4]那一格边上写着。
 #
 # [6] diagnostic_aggregator: 本机 sudo 需要密码, apt 装不上 -> 显式 SKIP 并打出安装命令。
 #   SKIP 不是 PASS: 汇总行会把"未验证"单独说出来(素材录 B-35 —— 结论行必须从本轮数据现算)。
@@ -144,12 +144,18 @@ chk "bag 里批数>0 (=${BAG_N:-0} 批)" "$(python3 -c "print(1 if ${BAG_N:-0}>1
 chk "bag 认得这是本项目的自定义类型 (不是 generic msg 兜底)" \
     "$(grep -c 'dmp_msgs/msg/DeviceFrameArray' "$LOG/bag/metadata.yaml" 2>/dev/null)" "1"
 
-echo "=== [4] 对照格: 不给 QoS override 直接录(预设=静默零条, 见文件头) ==="
+echo "=== [4] 对照格: 不给 QoS override 直接录(预设见文件头) ==="
 timeout -s INT 10 ros2 bag record -o "$LOG/bag_noqos" -s sqlite3 /dmp/frames > "$LOG/rec_noqos.log" 2>&1
 NOQOS_N=$(awk '/message_count:/{s+=$2} END{print s+0}' "$LOG/bag_noqos/metadata.yaml" 2>/dev/null)
 echo "  本轮读数: 不给 override 录到 ${NOQOS_N:-?} 批 (rosbag2 日志尾部: $(tail -2 "$LOG/rec_noqos.log" 2>/dev/null | tr '\n' '|'))"
-echo "  预设(跑之前按住不动): Humble 的 rosbag2 若以 reliable 订阅, 对 best_effort 发布应当静默零条"
-chk_pred "对照格与[2]反向: 不给 override 应当收不到(预设=0 批)" "${NOQOS_N:-0}" "0"
+# 预设的来历(两段都留着, 不许只留新的):
+#   跑之前我按素材录 B-07 的四格矩阵写下"reliable 订阅对 best_effort 发布 -> 静默零条";
+#   2026-09-29 首跑实测 141 批 —— 预设被推翻: Humble 的 rosbag2 会查发布端 offered QoS 并自建兼容订阅。
+#   改期望值只在**能解释**之后允许(否则就是把期望改成实测那一套自证)。新预设仍然可证伪:
+#   哪天这格变回 0, 要么 rosbag2 的探测行为变了, 要么桥的 QoS 变了 —— 两者都得重跑 B-07 那张表。
+NOQOS_EXPECT="${NOQOS_EXPECT:-1}"   # 1=应当收到(>10 批); 0=应当静默零条(旧预设, 留着做对照)
+chk_pred "对照格: 不给 override 也收到了(rosbag2 自动探测 offered QoS)" \
+    "$(python3 -c "print(1 if ${NOQOS_N:-0}>10 else 0)")" "$NOQOS_EXPECT"
 
 echo "=== [3] 把 bag 里的字节反序列化回 csv, 与实时侧逐字节比 ==="
 timeout -s INT 30 python3 - "$LOG/bag" "$LOG/bag.csv" > "$LOG/bagread.err" 2>&1 <<'PY'
@@ -174,10 +180,20 @@ BAGF=$(cut -d, -f2 "$LOG/bag.csv" 2>/dev/null | wc -l)
 echo "  实时侧 $LIVE_N 帧 / bag 内 $BAGF 帧"
 chk "bag 完整包含了实时侧每一帧且六字段逐字相同" "$(win_cmp "$LOG/live.csv" "$LOG/bag.csv" live-vs-bag)" "1"
 
-echo "=== [4b] 回放前先证实时侧已静默(不然 play.csv 的出处说不清) ==="
-kill -INT $LAUNCH 2>/dev/null; sleep 4
+echo "=== [4b] 回放前先把实时流关静默(不然 play.csv 的出处说不清) ==="
+# 首跑这里 FAIL 过: `kill -INT $LAUNCH` + sleep 4 后探针仍收到 64 帧。
+# 不猜原因, 分成两件事量: (i) 静音用生命周期门禁 —— on_deactivate 停定时器就是为此设计的,
+# 不依赖信号的传递语义; (ii) 把"launch 到底众多久才退"只**量不答**(compose [8] 里已经有
+# SIGINT 自退的正式断言, 这里重复断言只会让两格谁红了分不清)。
+timeout 30 ros2 lifecycle set /$NODE deactivate 2>&1 | tail -1
+chk "桥已处于 inactive(静音是门禁造成的, 不是网络碰巧)" \
+    "$(timeout 15 ros2 lifecycle get /$NODE 2>/dev/null | awk '{print $1}')" "inactive"
 SILENT=$(dump_frames "$LOG/silent.csv" 3 dmp_silent_probe >/dev/null 2>&1; cut -d, -f2 "$LOG/silent.csv" 2>/dev/null | wc -l)
-chk "桥已停: 这 3s 收到 0 帧 (否则下面回放读到什么都不知是活的)" "${SILENT:-0}" "0"
+chk "deactivate 后这 3s 实时侧确实 0 帧 (否则下面回放读到什么都不知是活的)" "${SILENT:-0}" "0"
+kill -INT $LAUNCH 2>/dev/null
+LAUNCH_GONE=unknown
+for _ki in $(seq 1 15); do kill -0 $LAUNCH 2>/dev/null || { LAUNCH_GONE=$(( _ki - 1 )); break; }; sleep 1; done
+echo "  只量不答: kill -INT 后 launch 进程 ${LAUNCH_GONE} s 后消失 (非 0/未消失 就是没退干净)"
 
 echo "=== [5] 回放: ros2 bag play, 另一个订阅方再落一次 csv ==="
 nohup timeout -s INT 14 ros2 bag play "$LOG/bag" > "$LOG/play.log" 2>&1 & PLAY=$!
@@ -185,6 +201,9 @@ sleep 2
 dump_frames "$LOG/play.csv" 10 dmp_play_probe
 wait $PLAY 2>/dev/null
 PLAYF=$(cut -d, -f2 "$LOG/play.csv" 2>/dev/null | wc -l)
+# 先立阳性对照再比内容: play.csv 空或很短时"每一帧都能找到"会永远为真(素材录 B-27)。
+chk "阳性对照: 回放侧真收到了东西 ($PLAYF 帧)" \
+    "$(python3 -c "print(1 if ${PLAYF:-0}>10 else 0)")" "1"
 chk "回放出来的每一帧都能回到 bag 里逐字段相同" "$(win_cmp "$LOG/play.csv" "$LOG/bag.csv" play-vs-bag)" "1"
 echo "  回放侧 $PLAYF 帧; play 日志尾部: $(grep -o 'duration:[^ ]*' "$LOG/play.log" 2>/dev/null | head -1)"
 

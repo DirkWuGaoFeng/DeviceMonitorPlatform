@@ -134,9 +134,12 @@ try {
     if ($LASTEXITCODE -ne 0) { Die "scp $remoteOut 失败 —— 读数没取回来, 本轮没有证据" }
     if (-not (Test-Path $out)) { Die "取回后本地没有 $out" }
     $raw = Get-Content $out -Raw
-    if ($raw.Length -eq 0) { Die '取回的读数是 0 字节(远端那句重定向没生效?)' }
+    if ($raw.Length -eq 0) { Die '取回的读数是 0 字(远端那句重定向没生效?)' }
     $cr = ([regex]::Matches($raw, [char]13)).Count
-    Write-Host "  evidence: $out size=$($raw.Length) CR=$cr (CR 应为 0, 否则是编码问题)"
+    # size 用 Get-Item 的字节数, 不用 $raw.Length: 后者是**字符**数, 中文一字三字节 ——
+    # 把字符数当成字节数写进证据表, 就是一个看上去差一点、实则算错了的数。
+    $bytes = (Get-Item $out).Length
+    Write-Host "  evidence: $out bytes=$bytes chars=$($raw.Length) CR=$cr (CR 应为 0, 否则是编码问题)"
     # “取回了文件”不等于“取回了一个结论”。本轮首跑就取回过一份 60 字节的读数: 远端脚本
     # 死在 install/setup.bash 的 unbound variable 上, ssh 本身却返回 0 —— 守卫如果只看退出码就会把
     # “没跑”当成“跑了”。判据: 没有 PASS=<数字> 这一行就直接停, 并把尾行打出来。
