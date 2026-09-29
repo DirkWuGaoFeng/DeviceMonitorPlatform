@@ -112,16 +112,7 @@ cmake --build build_wsl -j
 | `src/gateway_service.cpp` | TCP 文本行 (HELP/STATS/…) | **Windows** | 零依赖、可演示、`gw_probe.ps1` 验证 |
 | `service/grpc_server.cpp` | **gRPC/HTTP2 protobuf** | **WSL2** | 真 gRPC 契约落地，`grpc_client_probe` 验证 |
 
-两者**同语义、共用同一 `Acquisition` 解码/告警内核**，正好演示"业务层不动、只换传输层"的服务化能力——
-这也是把烽火 8 年 ZeroC Ice / gRPC 经验迁移到设备平台的桥接点。
-
----
-
-## 6. 简历/面试怎么讲
-
-> "服务层我给了两种实现：Windows 上是一个零依赖的 TCP 文本行网关（二进制帧→服务 API，已端到端跑通）；
-> 另在 WSL2 上用 apt 版 gRPC 把同一 `telemetry.proto` 契约编成真 gRPC 服务，`GetStats/GetAlarms` 一元+双向流
-> `Subscribe` 全部跑通。业务解码/告警内核两端共用，只是传输层不同——这体现我对'服务契约与实现解耦'的把握。"
+两者**同语义、共用同一 `Acquisition` 解码/告警内核**，正好演示“业务层不动、只换传输层”的服务化能力。
 
 ---
 

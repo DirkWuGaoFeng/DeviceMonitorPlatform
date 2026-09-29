@@ -17,7 +17,7 @@
 #   * 第二层的 start_state/goal_state 是**必须**的: 只写 goal_state='inactive' 的话,
 #     以后每次 deactivate 都会落回 inactive, 于是事件处理器把它再激活一次 ——
 #     "运维按下停止, 三秒后设备自己开始采集" 就是这种 bug 的现场形态。
-#   * 忘了激活的症状与素材录 B-01 同族: 节点在、话题在、不报错、零数据。
+#   * 忘了激活的症状与复盘录 B-01 同族: 节点在、话题在、不报错、零数据。
 #     负例请用 tools/vm_lifecycle_compose.sh, 别靠肉眼看。
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler

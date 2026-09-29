@@ -69,7 +69,7 @@ echo "=== [2] bridge_node (生命周期: 显式 configure -> activate) ==="
 #      真名由 __node 重映射决定 —— launch 里的 name= 做的其实就是这件事。
 #      这里手写 -r __node:=..., 目的是让 ros2 run / launch / 组合容器三条路径下的节点名一致。
 #   2) 桥起来后停在 unconfigured, 不连网关也不发话题 (刻意不 autostart, 见 bridge_main.cpp)。
-#      漏了 activate 的症状与素材录 B-01 同族: 节点在、话题在、不报错、零数据。
+#      漏了 activate 的症状与复盘录 B-01 同族: 节点在、话题在、不报错、零数据。
 #   3) 所以紧接着断言状态, 而不是靠"后面 echo 有没有东西"反推 —— 反推会把状态机问题
 #      误判成协议或 QoS 问题, 这个弯路本项目真走过。
 NODE=dmp_bridge_bed01

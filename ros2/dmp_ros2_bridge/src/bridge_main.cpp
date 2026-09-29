@@ -8,7 +8,7 @@
 //      所以这里显式用 executor + get_node_base_interface()。
 //   2) 刻意**不做 autostart**: 桥起来后停在 unconfigured, 不连网关也不发话题。
 //      采集必须是一次显式的 TRANSITION_ACTIVATE, 留下 /transition_event 与日志证据。
-//      代价要写明白: 忘了激活的症状与素材录 B-01 完全同族 —— 节点在、话题在、不报错、零数据。
+//      代价要写明白: 忘了激活的症状与复盘录 B-01 完全同族 —— 节点在、话题在、不报错、零数据。
 //      所以验收脚本里"configure + activate"是显式一步, 不是隐藏在这里。
 #include "dmp_ros2_bridge/bridge_node.hpp"
 

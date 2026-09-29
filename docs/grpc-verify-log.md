@@ -99,4 +99,4 @@ probe done.
 2. **gRPC 契约** —— `proto/telemetry.proto`
 3. **WSL2 真 gRPC 服务** —— `service/grpc_server.cpp`（本文，实测 `ok=120` + 流式订阅 + 告警）
 
-三者共用同一 `dmp::Acquisition` 解码/告警内核，业务层不动、只换传输层——面试可现场演示。
+三者共用同一 `dmp::Acquisition` 解码/告警内核，业务层不动、只换传输层——可现场演示。

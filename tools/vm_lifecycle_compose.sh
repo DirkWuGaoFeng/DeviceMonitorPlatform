@@ -104,7 +104,7 @@ PY
 # 中位数 mt +31.2ms / st +15.5ms; 14 个采样窗口里只出现 1 次 >400ms 停顿(474.2ms),
 # 而且落在**应当免疫的 mt 臂**。所以本轮结论是"头阻塞假设在此负载下不成立",
 # 数字与降级后的说法见 docs/adr/ADR-003。不要拿本脚本当"多线程有用"的证据。
-# 三条测量学教训(都是跑第 5、6、7 轮才暴露的, 详见素材录 B-35/B-36):
+# 三条测量学教训(都是跑第 5、6、7 轮才暴露的, 详见复盘录 B-35/B-36):
 #   1) 单轮不能归因: 一次 474ms 停顿既可能是调度也可能是 DDS/订阅端抖动, 判据是**重复 >=5 轮看符号分布**;
 #   2) 批数本身在 54~60 之间抖, 所以"掉了 5 批"不构成证据 —— 噪声底≈10%, 任何小于它的差都不要读数;
 #   3) 中位数的**大小关系**也随样本集合翻转(6 轮时 mt < st, 7 轮时 mt > st) —— 能翻转的排序就不是效应。
@@ -166,7 +166,7 @@ chk "unconfigured 时 /dmp/frames 不在 topic list" \
 chk "unconfigured 时自研服务不在 service list" \
     "$(g_services | grep -c '^/dmp/bed01/selftest$')" "0"
 echo "  (为什么不用 ros2 service call 的报错文本来断言: 服务不存在时它会一直卡在 waiting for service,"
-echo "   timeout 剔掉后 stdout 是空的, 只会得到一句[到底是没起来还是没联通]的模糊结论 —— 见素材录 B-15)"
+echo "   timeout 剔掉后 stdout 是空的, 只会得到一句[到底是没起来还是没联通]的模糊结论 —— 见复盘录 B-15)"
 echo "  (生命周期服务 change_state 反过来必须一直在 —— 它是进入其它状态的唯一入口, 由 LifecycleNode 基类在构造期创建)"
 chk "change_state 服务在" "$(g_services | grep -c "/$NODE/change_state")" "1"
 
@@ -307,7 +307,7 @@ echo "=== [6] 毒化 A/B: 把一台设备的网关端点换成坏地址, 单线�
 # 长回调不需要人造: connectNew() 以前没有超时, 而它跑在**调用方的回调里**
 # (tickLink 定时器 / 三个服务 / 连 on_configure 的 refreshRules 都走它),
 # 所以"一次网络故障 = 整个容器冻结那么久"本来就已经是产品行为。
-# 三档毒化(全部**现场量**, 不写死数字 —— 写死过一次, 后果见素材录 B-35):
+# 三档毒化(全部**现场量**, 不写死数字 —— 写死过一次, 后果见复盘录 B-35):
 #   fast : 本机无监听端口     -> 立即 ECONNREFUSED, 对照组: 证明"毒化"这个动作本身不伤数据面
 #   mid  : 同网段不存在的主机 -> 内核 SYN 重试到 EHOSTUNREACH (2026-09-29 VM 实测≈3.1s)
 #   worst: 私网黑洞(包被 drop) -> 重试到超时而失败   (同日实测≈21s)
@@ -547,7 +547,7 @@ sleep 6
 timeout 30 ros2 lifecycle set /$SHNODE configure >/dev/null 2>&1
 timeout 30 ros2 lifecycle set /$SHNODE activate  >/dev/null 2>&1
 sleep 3
-# 阳性对照先立住: 不先证明"它在发", 后面那句"零批"就什么也证明不了 —— 那是一条永远为真的断言(素材录 B-27)。
+# 阳性对照先立住: 不先证明"它在发", 后面那句"零批"就什么也证明不了 —— 那是一条永远为真的断言(复盘录 B-27)。
 recorder 4 "$LOG/gap_pre_shutdown.json" >/dev/null 2>&1
 PRE_N=$(python3 -c "import json;print(sum(json.load(open('$LOG/gap_pre_shutdown.json'))['count'].values()))" 2>/dev/null)
 chk "shutdown 前它确实在发(否则后面的零批无意义) $PRE_N 批" "$(python3 -c "print(1 if ${PRE_N:-0}>10 else 0)")" "1"

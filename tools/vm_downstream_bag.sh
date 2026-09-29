@@ -9,11 +9,11 @@
 #   [1] 实时侧(我自己写的 best_effort 订阅方)在录的同时逐条落 csv   -> 拿到"应有的样子"
 #   [2] rosbag2 录制 -> 用 rosbag2_py 把 bag 里的字节反序列化回 csv   -> 与 [1] 逐字节 cmp
 #   [3] ros2 bag play 回放 -> 另一个实时订阅方再落 csv               -> 与 [2] 逐字节 cmp
-#   少 [1] 则 [2] 的"零条"永远为真(素材录 B-27); 少 [3] 则"存进去了"不等于"取出来还是它"。
+#   少 [1] 则 [2] 的"零条"永远为真(复盘录 B-27); 少 [3] 则"存进去了"不等于"取出来还是它"。
 #
 # [4] 是一格**预设了再跑**的对照: 不给 QoS override 直接 ros2 bag record。
 #   跑之前的预设(摁住不动): rosbag2 默认以 reliable 订阅, 而桥默认发 best_effort(sensor) ——
-#   按本项目实测过的错配方向(素材录 B-07 的四格矩阵), 应当是**静默零条**。
+#   按本项目实测过的错配方向(复盘录 B-07 的四格矩阵), 应当是**静默零条**。
 #   2026-09-29 首跑实测 141 批: **预设被推翻**。Humble 的 rosbag2 会查发布端 offered QoS 并
 #   自建兼容订阅 —— 生态工具比我手写的订阅方聪明。新预设与证据都在[4]那一格边上写着。
 #
@@ -27,7 +27,7 @@ set +u
 set +e
 source /opt/ros/humble/setup.bash
 # 不要在 source 完ROS 后就把 set -u 开回来: ament 生成的 install/setup.bash 里读了 COLCON_TRACE
-# 这类未必存在的变量。素材录 B-14 记的是 /opt/ros 那一份, 本轮(2026-09-29 首跑)在
+# 这类未必存在的变量。复盘录 B-14 记的是 /opt/ros 那一份, 本轮(2026-09-29 首跑)在
 # install/setup.bash:11 又撞了一次 —— 同一条不兼容对**每个** ament 脚本都成立, 不是某一个的毛病。
 # 代价只是少一个拼写检查; 换来的是一句无声死在环境加载里的 rc=1 与 60 字节日志。
 DMP_HOME="${DMP_HOME:-$HOME/RosProject}"
@@ -44,7 +44,7 @@ pkill -f bridge_node 2>/dev/null
 pkill -f 'ros2 bag' 2>/dev/null
 # 按名字收, 不用 $! : 上一轮侦查实测 `kill $PID` 只杀掉了 `ros2 run` 的外壳,
 # aggregator_node / example_pub.py 子进程照旧活着, 于是下一个阶段的读数里混着上一个阶段的
-# 发布物(具体到这里: /diagnostics_agg 被 example 的 /Aggregation/* 占满)。素材录 B-40 跨轮污染
+# 发布物(具体到这里: /diagnostics_agg 被 example 的 /Aggregation/* 占满)。复盘录 B-40 跨轮污染
 # 的**同族**, 只是这次发生在同一个脚本的两个阶段之间, 不是两轮之间。
 pkill -f aggregator_node 2>/dev/null
 pkill -f example_pub.py 2>/dev/null
@@ -64,7 +64,7 @@ chk_pred() {  # chk_pred <说明> <实测> <预设>
 
 # 比**窗口**而不是比整个文件: 三个采集窗天然长短不一(bag 录 16s, 实时订阅方只盯 8s)。
 # 若直接 cmp 两个 csv, 边界不同会**必然**不等 —— 那是脚本自己的错, 拿来当链路结论就是假红
-# (素材录 B-37 的同族: 统计量的定义没对齐, 数字就只是在比谁截得多)。
+# (复盘录 B-37 的同族: 统计量的定义没对齐, 数字就只是在比谁截得多)。
 # 判据: 短的一侧(A)每一行, 按 seq 在长的一侧(B)里都能找到且**六个字段逐一相同**。
 win_cmp() {  # win_cmp <A.csv 应被包含> <B.csv 全集> <名字>; stdout=1/0, stderr=明细
   python3 - "$1" "$2" "$3" <<'PY'
@@ -232,7 +232,7 @@ timeout -s INT 10 ros2 bag record -o "$LOG/bag_noqos" -s sqlite3 /dmp/frames > "
 NOQOS_N=$(awk '/message_count:/{s+=$2} END{print s+0}' "$LOG/bag_noqos/metadata.yaml" 2>/dev/null)
 echo "  本轮读数: 不给 override 录到 ${NOQOS_N:-?} 批 (rosbag2 日志尾部: $(tail -2 "$LOG/rec_noqos.log" 2>/dev/null | tr '\n' '|'))"
 # 预设的来历(两段都留着, 不许只留新的):
-#   跑之前我按素材录 B-07 的四格矩阵写下"reliable 订阅对 best_effort 发布 -> 静默零条";
+#   跑之前我按复盘录 B-07 的四格矩阵写下"reliable 订阅对 best_effort 发布 -> 静默零条";
 #   2026-09-29 首跑实测 141 批 —— 预设被推翻: Humble 的 rosbag2 会查发布端 offered QoS 并自建兼容订阅。
 #   改期望值只在**能解释**之后允许(否则就是把期望改成实测那一套自证)。新预设仍然可证伪:
 #   哪天这格变回 0, 要么 rosbag2 的探测行为变了, 要么桥的 QoS 变了 —— 两者都得重跑 B-07 那张表。
@@ -410,7 +410,7 @@ sleep 2
 dump_frames "$LOG/play.csv" 10 dmp_play_probe
 wait $PLAY 2>/dev/null
 PLAYF=$(cut -d, -f2 "$LOG/play.csv" 2>/dev/null | wc -l)
-# 先立阳性对照再比内容: play.csv 空或很短时"每一帧都能找到"会永远为真(素材录 B-27)。
+# 先立阳性对照再比内容: play.csv 空或很短时"每一帧都能找到"会永远为真(复盘录 B-27)。
 chk "阳性对照: 回放侧真收到了东西 ($PLAYF 帧)" \
     "$(python3 -c "print(1 if ${PLAYF:-0}>10 else 0)")" "1"
 chk "回放出来的每一帧都能回到 bag 里逐字段相同" "$(win_cmp "$LOG/play.csv" "$LOG/bag.csv" play-vs-bag)" "1"
@@ -420,7 +420,7 @@ echo "=== [9b] 收尾读数: 别把进程留给下一轮 ==="
 # 为什么不是只靠 kill -INT: 上一轮实测 launch 收到 SIGINT 后 15s 都没退。脚本开头那句
 # pkill -f bridge_node 只能杀掉节点本体, launch 自己的 python 进程会一轮一轮堆下去 ——
 # 残留进程就是 B-40 那一类跨轮污染。这里按**名字**收, 并量一个"收完还在几个"的读数;
-# 模式串不会匹到自己(本脚本叫 vm_downstream_bag.sh, 素材录 B-08)。
+# 模式串不会匹到自己(本脚本叫 vm_downstream_bag.sh, 复盘录 B-08)。
 kill $GW $SIM 2>/dev/null
 kill $AGG 2>/dev/null          # 只 kill 外壳不够, 下面还按名字收一道
 pkill -f aggregator_node 2>/dev/null

@@ -6,7 +6,7 @@
 # 到底填什么(example_analyzers.yaml 顶层是 `analyzers:`, 但节点名是不是它, 不看源码不知道);
 # (iii) GenericAnalyzer 的 startswith/contains 匹的是 DiagnosticStatus.name 的哪种形状
 # (我们的 name 是 telemetry_link / Temp_ch0, 而 example 里写的是 '/arms' 带前导斜杠)。
-# 这三件都是**凭印象就会写错**的东西(素材录 B-04/B-11 那一类: 记成"应该是这样"的 API)。
+# 这三件都是**凭印象就会写错**的东西(复盘录 B-04/B-11 那一类: 记成"应该是这样"的 API)。
 #
 # 本脚本不作断言, 只打印读数; 结论不进验收表。
 set +u

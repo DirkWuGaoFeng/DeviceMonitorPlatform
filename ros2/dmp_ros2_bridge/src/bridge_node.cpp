@@ -111,7 +111,7 @@ CallbackReturn DmpBridgeNode::on_configure(const rclcpp_lifecycle::State& /*prev
 
     // 服务在 configure 就创建 -> inactive 期间**仍然可被调用**, 应答里带当前状态。
     // 刻意不在 activate 才建: 未激活时服务消失, 调用方只会停在 "waiting for service to become
-    // available..." 且没有任何错误信息 (这个坑记在素材录 B-15)。可查询的"我没在干活"
+    // available..." 且没有任何错误信息 (这个坑记在复盘录 B-15)。可查询的"我没在干活"
     // 比不可查询的沉默安全得多 —— 尤其在医疗语境下。
     const auto svcQos = rmw_qos_profile_services_default;
     srvSelftest_ = this->create_service<dmp_msgs::srv::Selftest>(
