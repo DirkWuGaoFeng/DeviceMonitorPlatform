@@ -190,10 +190,9 @@ chk "桥已处于 inactive(静音是门禁造成的, 不是网络碰巧)" \
     "$(timeout 15 ros2 lifecycle get /$NODE 2>/dev/null | awk '{print $1}')" "inactive"
 SILENT=$(dump_frames "$LOG/silent.csv" 3 dmp_silent_probe >/dev/null 2>&1; cut -d, -f2 "$LOG/silent.csv" 2>/dev/null | wc -l)
 chk "deactivate 后这 3s 实时侧确实 0 帧 (否则下面回放读到什么都不知是活的)" "${SILENT:-0}" "0"
-kill -INT $LAUNCH 2>/dev/null
-LAUNCH_GONE=unknown
-for _ki in $(seq 1 15); do kill -0 $LAUNCH 2>/dev/null || { LAUNCH_GONE=$(( _ki - 1 )); break; }; sleep 1; done
-echo "  只量不答: kill -INT 后 launch 进程 ${LAUNCH_GONE} s 后消失 (非 0/未消失 就是没退干净)"
+# 本格的预算就是这两条断言(状态 + 0 帧), 不再多 kill 一次: 上一轮量到的事实是
+# `kill -INT $LAUNCH` 15s 内没让 launch 退 —— 那是 launch 的信号传递问题, 不该拖这里的计时。
+# 收尾在 [9b]: 按名字收, 并量一个"收完还在几个"。
 
 echo "=== [5] 回放: ros2 bag play, 另一个订阅方再落一次 csv ==="
 nohup timeout -s INT 14 ros2 bag play "$LOG/bag" > "$LOG/play.log" 2>&1 & PLAY=$!
@@ -218,6 +217,19 @@ else
   SKIP=$((SKIP+1))
 fi
 
+echo "=== [9b] 收尾读数: 别把进程留给下一轮 ==="
+# 为什么不是只靠 kill -INT: 上一轮实测 launch 收到 SIGINT 后 15s 都没退。脚本开头那句
+# pkill -f bridge_node 只能杀掉节点本体, launch 自己的 python 进程会一轮一轮堆下去 ——
+# 残留进程就是 B-40 那一类跨轮污染。这里按**名字**收, 并量一个"收完还在几个"的读数;
+# 模式串不会匹到自己(本脚本叫 vm_downstream_bag.sh, 素材录 B-08)。
+kill $GW $SIM 2>/dev/null
+pkill -f dmp_bridge.launch.py 2>/dev/null; pkill -f bridge_node 2>/dev/null
+sleep 2
+LEFT=$(pgrep -f 'bridge_node|dmp_bridge.launch.py' | wc -l)
+LEFT2=$(pgrep -f 'build_linux/(device_simulator|gateway_service)' | wc -l)
+echo "  读数: 桥相关进程仍在 $LEFT 个; sim/gateway 仍在 $LEFT2 个 (两边都应当 0)"
+chk "收尾收干净了(不给下一轮埋跨轮污染)" "$(python3 -c "print(1 if ${LEFT:-0}==0 and ${LEFT2:-0}==0 else 0)")" "1"
+
 echo "=== [9] 汇总 ==="
 echo "  PASS=$PASS FAIL=$FAIL SKIP=$SKIP PRED_OVERTURNED=$PRED_FAIL"
 [ "$SKIP" -gt 0 ] && echo "  注: SKIP 不算通过。本脚本对『告警沿标准诊断栈传播』这件事**没有任何证据**, 只有 bag 那几格。"
@@ -227,6 +239,6 @@ if [ "$FAIL" = 0 ] && [ "$PASS" -gt 0 ]; then
 fi
 echo SCRIPT_DONE
 
-# 收尾: 别把进程留给下一轮(素材录 B-08: pkill 的模式串会匹配到自己)
-kill -INT $LAUNCH 2>/dev/null; kill $GW $SIM 2>/dev/null
+# 收尾: 进程已在 [9b] 按名字收并量过读数; 这里只对 sim/gateway 再补一刀(幂等)。
+kill $GW $SIM 2>/dev/null
 exit 0
