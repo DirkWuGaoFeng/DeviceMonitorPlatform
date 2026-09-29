@@ -47,6 +47,21 @@ chk() {  # chk <说明> <实际> <期望>
   else echo "  FAIL $1: 实际=$2 期望=$3"; FAIL=$((FAIL+1)); fi
 }
 
+# 图上的"必须不存在"断言不能走 ros2 CLI 的默认路径: 那个读的是 ros2-daemon 的图缓存,
+# 而缓存会活得比参与者久(探针实测: 一个没来得及道别就消失的发布者, daemon 路报 1 /
+# 现场路报 0 / 停掉 daemon 后两路同时归零)。拿缓存做负断言, 错的方向恰好是"假红"。
+# 现场发现 = --no-daemon + 给足 spin-time; spin-time 不能小, 否则正断言会因为发现没走完而假红,
+# 那就是用一个新坑换掉一个旧坑。
+SPIN=6
+g_topics()  { timeout 30 ros2 topic list   --no-daemon --spin-time $SPIN 2>/dev/null; }
+g_services(){ timeout 30 ros2 service list --no-daemon --spin-time $SPIN 2>/dev/null; }
+g_nodes()   { timeout 30 ros2 node list    --no-daemon --spin-time $SPIN 2>/dev/null; }
+# 两路读数都打出来: 它们不一致本身就是读数, 说明本轮有一次退出没道别、缓存在说谎。
+diag_graph() {  # diag_graph <标签>
+  echo "  [图诊断 $1] /dmp/frames: 现场=$(g_topics | grep -c '^/dmp/frames$') daemon=$(timeout 20 ros2 topic list 2>/dev/null | grep -c '^/dmp/frames$')"
+  echo "  [图诊断 $1] 存活参与者: $(pgrep -af 'component_container|bridge_node' 2>/dev/null | tr '\n' ';' | cut -c1-160)"
+}
+
 # 记录 /dmp/frames 各来源(frame_id)的到达间隔。订阅 QoS 必须 best_effort:
 # 桥默认发 sensor(best_effort), 用 reliable 订阅会得到"零数据", 那测的是 QoS 不是生命周期。
 recorder() {  # recorder <秒> <输出json文件> [停顿阈值ms=400]
@@ -140,21 +155,22 @@ NODE=dmp_bridge_bed01
 nohup ros2 launch dmp_ros2_bridge dmp_bridge.launch.py device_id:=bed01 gateway_port:="$GW_PORT" \
      autostart:=false > "$LOG/bridge_unconf.log" 2>&1 & LAUNCH=$!
 sleep 6
-echo "  node 在吗: $(timeout 15 ros2 node list 2>/dev/null | grep -c "/$NODE")  (期望 1: 节点本身构造即存在)"
+diag_graph "[1]开头"
+echo "  node 在吗: $(g_nodes | grep -c "/$NODE")  (期望 1: 节点本身构造即存在)"
 chk "unconfigured 时 /dmp/frames 不在 topic list" \
-    "$(timeout 15 ros2 topic list 2>/dev/null | grep -c '^/dmp/frames$')" "0"
+    "$(g_topics | grep -c '^/dmp/frames$')" "0"
 chk "unconfigured 时自研服务不在 service list" \
-    "$(timeout 15 ros2 service list 2>/dev/null | grep -c '^/dmp/bed01/selftest$')" "0"
+    "$(g_services | grep -c '^/dmp/bed01/selftest$')" "0"
 echo "  (为什么不用 ros2 service call 的报错文本来断言: 服务不存在时它会一直卡在 waiting for service,"
 echo "   timeout 剔掉后 stdout 是空的, 只会得到一句[到底是没起来还是没联通]的模糊结论 —— 见素材录 B-15)"
 echo "  (生命周期服务 change_state 反过来必须一直在 —— 它是进入其它状态的唯一入口, 由 LifecycleNode 基类在构造期创建)"
-chk "change_state 服务在" "$(timeout 15 ros2 service list 2>/dev/null | grep -c "/$NODE/change_state")" "1"
+chk "change_state 服务在" "$(g_services | grep -c "/$NODE/change_state")" "1"
 
 echo "=== [2] configure -> inactive: 话题/服务出现, 但零数据, 且写路径被拒 ==="
 timeout 30 ros2 lifecycle set /$NODE configure 2>&1 | tail -1
 sleep 2
 chk "state=inactive" "$(timeout 15 ros2 lifecycle get /$NODE 2>/dev/null | awk '{print $1}')" "inactive"
-chk "configure 后 /dmp/frames 出现" "$(timeout 15 ros2 topic list 2>/dev/null | grep -c '^/dmp/frames$')" "1"
+chk "configure 后 /dmp/frames 出现" "$(g_topics | grep -c '^/dmp/frames$')" "1"
 recorder 6 "$LOG/gap_inactive.json"
 echo "  inactive 期间采样: $(cat "$LOG/gap_inactive.json")"
 chk "inactive 零数据(守卫生效, 不是碰巧)" "$(python3 -c "import json;print(sum(json.load(open('$LOG/gap_inactive.json'))['count'].values()))")" "0"
@@ -185,8 +201,9 @@ DEACT_N=$(python3 -c "import json;print(sum(json.load(open('$LOG/gap_deact.json'
 chk "deactivate 后再次零数据(证明状态机不是只做一次性启动)" "$DEACT_N" "0"
 timeout 30 ros2 lifecycle set /$NODE cleanup 2>&1 | tail -1
 sleep 2
+diag_graph "[4]cleanup后"
 chk "cleanup 后 /dmp/frames 再消失(on_cleanup 真释放了 publisher)" \
-    "$(timeout 15 ros2 topic list 2>/dev/null | grep -c '^/dmp/frames$')" "0"
+    "$(g_topics | grep -c '^/dmp/frames$')" "0"
 echo "  (只打一行日志不算证据: 话题从 ROS 图上消失才是 publisher 对象析构的外部可观测结果)"
 kill "$LAUNCH" 2>/dev/null; pkill -f bridge_node 2>/dev/null; sleep 2
 
