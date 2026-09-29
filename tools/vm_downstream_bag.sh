@@ -165,9 +165,11 @@ rows = [r for r in csv.reader(open(sys.argv[1])) if r and len(r) == 5]
 raw, agg = {}, {}
 for tag, name, level, hw, _msg in rows:
     (raw if tag == 'raw' else agg)[name] = (level, hw)   # 同窗内反复发布, 留最后一次读数
-# 聚合后的条目名形如 /DMP/Link/ telemetry_link(analyzer 的 path 在前, 条目名原样拼在后) ——
-# 这个形状是 2026-09-29 侦查轮从厂商 example 的 /Aggregation/Arms/ arms left motor 上看到的,
-# 不是猜的; 所以这里用"以原始 name 结尾"去认, 而不是要它全字等于。
+# 聚合后的条目名形如 /DMP/Channels/CONC_ch3(analyzer 的 path 在前, 条目名原样拼在后)。
+# 这个形状是 2026-09-29 实跑量出来的; 当时先照厂商 example 写成"path + '/ ' + name"(它们那行是
+# /Aggregation/Arms/ arms left motor, 斜杠后带个空格) —— 我们这里**不带空格**, 因为带不带空格
+# 取决于上游 status 自己的 name 长什么样, 不是一个可以依赖的约定。所以这里用"以原始 name 结尾"去认,
+# 而不是把两种形状都写进期望值。
 link = [k for k in agg if k.endswith('telemetry_link')]
 chan = [k for k in agg if re.search(r'_ch\d+$', k)]
 cmped = [(r, a) for r, (lv, _h) in raw.items() for a in agg if a.endswith(r)]
@@ -195,8 +197,9 @@ nohup ./build_linux/device_simulator "$SIM_PORT" > "$LOG/sim.log" 2>&1 & SIM=$!
 sleep 1
 nohup ./build_linux/gateway_service "$GW_PORT" 127.0.0.1 "$SIM_PORT" > "$LOG/gw.log" 2>&1 & GW=$!
 sleep 2
-NODE=dmp_bridge_bed01
-nohup ros2 launch dmp_ros2_bridge dmp_bridge.launch.py device_id:=bed01 gateway_port:="$GW_PORT" \
+DEV_ID=bed01
+NODE=dmp_bridge_$DEV_ID
+nohup ros2 launch dmp_ros2_bridge dmp_bridge.launch.py device_id:=$DEV_ID gateway_port:="$GW_PORT" \
      > "$LOG/bridge.log" 2>&1 & LAUNCH=$!
 sleep 12
 chk "桥真的起来了(下游一切的前提, 不是碰巧有数据)" \
@@ -266,6 +269,8 @@ echo "=== [6] diagnostic_aggregator: 让标准诊断栈聚合我们的 /diagnost
 # 参数文件的形状照搬厂商 example(顶层键就是 `analyzers`, 实测 ros2 node list 得到的节点名正是 /analyzers):
 #   /opt/ros/humble/share/diagnostic_aggregator/example_analyzers.yaml
 # 聚合输出话题 /diagnostics_agg, 顶层汇总 /diagnostics_toplevel_state —— 两个都是侦查轮量出来的。
+# 读数里 AGG_N 比 RAW_N 多出的那几个不是新告警, 是聚合树自己的分组节点(/DMP 与每个 analyzer 一个):
+# 2026-09-29 本轮原始 5 项 / 聚合 8 项, 多的 3 个就正对 /DMP、/DMP/Link、/DMP/Channels。
 cat > "$LOG/agg.yaml" <<'YAML'
 analyzers:
   ros__parameters:
@@ -308,6 +313,82 @@ chk "聚合前后同名项 level 逐条一致 (比了 $(g "$KV" CMP) 条, 不一
 HW_EXPECT="${HW_EXPECT:-1}"   # 1=聚合项应当保留我们的 hardware_id=bed01
 chk_pred_agg "预设: 聚合不丢 hardware_id(多台设备共用一个聚合器时靠它分辨)" \
     "$(python3 -c "print(1 if $(g "$KV" HW_KEEP) > 0 else 0)")" "$HW_EXPECT"
+
+echo "=== [6b] 把一条阈值挪到现值之外: 非 OK 能不能沿标准诊断栈传出去 ==="
+# 为什么还要这一格: [6] 那七条只证到"我们的项被聚合、level 逐条透传", 而那一窗里**全部**是 OK(0)。
+# 0 对 0 的一致是**弱证据** —— “告警沿标准诊断栈传播”这句话, 没有非 OK 那一侧就不能算验证过。
+# 手段用桥自己的服务(不改固件、不改网关代码): 先读当前现值与阈值, 再把区间挪到现值之外。
+# 注意这是**双向**注入: 所以必须先把原始侧推到非 OK 当作本格的阳性对照, 否则下面那条"聚合侧也非 OK"
+# 又掉回 B-27 那个形状(一个永远为真的断言)。末尾把阈值恢复回去: 不把改造过的现场留给后面几格。
+IKV=$(timeout -s INT 90 python3 - "$DEV_ID" 2>"$LOG/inject.err" <<'PY' | tail -1
+import re, sys, time
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from diagnostic_msgs.msg import DiagnosticArray
+from dmp_msgs.srv import GetRules, SetRule
+dev = sys.argv[1]
+rclpy.init(); n = Node('dmp_agg_inject')
+def lv_of(s):                      # 同一个 uint8->bytes 的坑, 见 [6] 的注释
+    v = s.level
+    return v[0] if isinstance(v, (bytes, bytearray)) and len(v) == 1 else int(v)
+qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+raw, agg = {}, {}
+def on_raw(m):
+    for s in m.status:
+        raw[s.name] = (lv_of(s), s.hardware_id, {kv.key: kv.value for kv in s.values})
+def on_agg(m):
+    for s in m.status:
+        agg[s.name] = lv_of(s)
+n.create_subscription(DiagnosticArray, '/diagnostics',     on_raw, qos)
+n.create_subscription(DiagnosticArray, '/diagnostics_agg', on_agg, qos)
+def spin(sec):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < sec:
+        rclpy.spin_once(n, timeout_sec=0.05)
+spin(4)
+cand = [k for k in raw if re.search(r'_ch\d+$', k) and raw[k][0] == 0
+        and raw[k][2].get('rule', '-') != '-' and 'value' in raw[k][2]]
+if not cand:
+    print('INJ_RAW_LVL=-1 INJ_AGG_LVL=-1 INJ_ACCEPT=0 RESTORE=0'); sys.exit()
+name = sorted(cand)[0]
+kind_name = name.rsplit('_ch', 1)[0]
+value = float(raw[name][2]['value'])
+cl = n.create_client(GetRules, '/dmp/%s/get_rules' % dev)
+if not cl.wait_for_service(timeout_sec=10):
+    print('INJ_RAW_LVL=-1 INJ_AGG_LVL=-1 INJ_ACCEPT=0 RESTORE=0'); sys.exit()
+f = cl.call_async(GetRules.Request())
+rclpy.spin_until_future_complete(n, f, timeout_sec=15)
+rules = f.result().rules if f.result() is not None else []
+kind, orig = None, None
+for r in rules:
+    if r.kind_name.lower() == kind_name.lower():
+        kind, orig = int(r.kind), (float(r.low), float(r.high))
+if kind is None:
+    print('INJ_RAW_LVL=-1 INJ_AGG_LVL=-1 INJ_ACCEPT=0 RESTORE=0'); sys.exit()
+sc = n.create_client(SetRule, '/dmp/%s/set_rule' % dev)
+sc.wait_for_service(timeout_sec=10)
+def call(low, high, msg):
+    q = SetRule.Request(); q.kind = kind; q.low = low; q.high = high; q.message = msg
+    ff = sc.call_async(q)
+    rclpy.spin_until_future_complete(n, ff, timeout_sec=20)
+    return 1 if (ff.result() is not None and ff.result().accepted) else 0
+# 区间整段抬到现值之上: 按 levelFor 的定义, 越界就是 Error(2), 不靠预警带那种边界情形
+accept = call(value + 1000.0, value + 2000.0, 'e3-forced-out-of-range')
+spin(6)
+agg_key = next((k for k in agg if k.endswith(name)), '')
+raw_lvl = raw[name][0] if name in raw else -1
+agg_lvl = agg.get(agg_key, -1)
+restore = call(orig[0], orig[1], 'e3-restore')
+print('INJ_RAW_LVL=%d INJ_AGG_LVL=%d INJ_ACCEPT=%d RESTORE=%d' % (raw_lvl, agg_lvl, accept, restore))
+PY
+)
+echo "  读数: $IKV  (详见 $LOG/inject.err)"
+chk "注入确实把**原始侧**那条推到非 OK(阳性对照: 不然下一条又永远为真)" \
+    "$(python3 -c "print(1 if $(g "$IKV" INJ_RAW_LVL) > 0 else 0)")" "1"
+chk "同一个非 OK 出现在聚合侧, 且与原始侧同值（告警沿标准诊断栈传出去）" \
+    "$(python3 -c "a=$(g "$IKV" INJ_RAW_LVL); b=$(g "$IKV" INJ_AGG_LVL); print(1 if a>0 and a==b else 0)")" "1"
+chk "阈值已恢复原值(不把改造过的现场留给后面几格)" "$(g "$IKV" RESTORE)" "1"
 
 echo "=== [4b] 回放前先把实时流关静默(不然 play.csv 的出处说不清) ==="
 # 首跑这里 FAIL 过: `kill -INT $LAUNCH` + sleep 4 后探针仍收到 64 帧。
