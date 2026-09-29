@@ -57,9 +57,13 @@ g_topics()  { timeout 30 ros2 topic list   --no-daemon --spin-time $SPIN 2>/dev/
 g_services(){ timeout 30 ros2 service list --no-daemon --spin-time $SPIN 2>/dev/null; }
 g_nodes()   { timeout 30 ros2 node list    --no-daemon --spin-time $SPIN 2>/dev/null; }
 # 两路读数都打出来: 它们不一致本身就是读数, 说明本轮有一次退出没道别、缓存在说谎。
+# 存活名单必须包含 recorder/python 订阅方: 纯订阅方也会让话题出现在 list 里,
+# 而上一版的 pgrep 只看容器与 bridge_node —— 真凶要是个订阅者, 这个诊断本身就分辨不开。
 diag_graph() {  # diag_graph <标签>
   echo "  [图诊断 $1] /dmp/frames: 现场=$(g_topics | grep -c '^/dmp/frames$') daemon=$(timeout 20 ros2 topic list 2>/dev/null | grep -c '^/dmp/frames$')"
-  echo "  [图诊断 $1] 存活参与者: $(pgrep -af 'component_container|bridge_node' 2>/dev/null | tr '\n' ';' | cut -c1-160)"
+  echo "  [图诊断 $1] 容器/桥: $(pgrep -af 'component_container|bridge_node' 2>/dev/null | tr '\n' ';' | cut -c1-160)"
+  echo "  [图诊断 $1] 其它 ROS 参与者(python 订阅方/CLI): $(pgrep -af 'python3 - |ros2 topic|ros2 service|ros2 lifecycle' 2>/dev/null | grep -v pgrep | tr '\n' ';' | cut -c1-160)"
+  echo "  [图诊断 $1] 上一个容器已活多久: $(ps -eo etimes=,args= 2>/dev/null | grep -E 'component_container|bridge_node' | grep -v grep | awk '{print $1}' | tr '\n' ' ')"
 }
 
 # 记录 /dmp/frames 各来源(frame_id)的到达间隔。订阅 QoS 必须 best_effort:
