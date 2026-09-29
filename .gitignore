@@ -11,6 +11,10 @@ build*/
 _dmp_storage_test*.csv
 qt_demo_stat.txt
 
+# Python 字节码（ros2 launch 目录跑 py_compile / import 时会生成，不得入库）
+__pycache__/
+*.pyc
+
 # IDE
 .claude/
 .idea/
