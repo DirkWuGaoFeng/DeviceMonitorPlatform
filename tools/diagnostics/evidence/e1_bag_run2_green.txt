@@ -1,0 +1,35 @@
+=== [0] simulator + gateway + 桥(autostart 走完 configure->activate) ===
+  PASS 桥真的起来了(下游一切的前提, 不是碰巧有数据) (=active)
+=== [1][2] 同一窗口内: 我自己订阅落 csv + rosbag2 录制 ===
+  PASS 阳性对照: 实时侧这段时间确实在发 (160 帧) —— 否则下面 bag 的条数说明不了任何事 (=1)
+  PASS rosbag2 录出了存储目录 (=1)
+  PASS bag 里批数>0 (=231 批) (=1)
+  PASS bag 认得这是本项目的自定义类型 (不是 generic msg 兜底) (=1)
+=== [4] 对照格: 不给 QoS override 直接录(预设见文件头) ===
+  本轮读数: 不给 override 录到 144 批 (rosbag2 日志尾部: [INFO] [1790669040.804890382] [rosbag2_recorder]: Event publisher thread: Exiting|[INFO] [1790669040.805399756] [rosbag2_recorder]: Recording stopped|)
+  PASS(预设命中) 对照格: 不给 override 也收到了(rosbag2 自动探测 offered QoS) (=1)
+=== [3] 把 bag 里的字节反序列化回 csv, 与实时侧逐字节比 ===
+  实时侧 160 帧 / bag 内 308 帧
+live-vs-bag: A=160 B=308 找不到=0 字段不同=0 首个差异=-
+  PASS bag 完整包含了实时侧每一帧且六字段逐字相同 (=1)
+=== [4b] 回放前先把实时流关静默(不然 play.csv 的出处说不清) ===
+Transitioning successful
+  PASS 桥已处于 inactive(静音是门禁造成的, 不是网络碰巧) (=inactive)
+  PASS deactivate 后这 3s 实时侧确实 0 帧 (否则下面回放读到什么都不知是活的) (=0)
+=== [5] 回放: ros2 bag play, 另一个订阅方再落一次 csv ===
+  PASS 阳性对照: 回放侧真收到了东西 (200 帧) (=1)
+play-vs-bag: A=200 B=308 找不到=0 字段不同=0 首个差异=-
+  PASS 回放出来的每一帧都能回到 bag 里逐字段相同 (=1)
+  回放侧 200 帧; play 日志尾部: 
+=== [6] diagnostic_aggregator(标准诊断栈聚合) ===
+  SKIP: 本机无 ros-humble-diagnostic-aggregator 且 sudo 需要密码, 装不了。
+  要跑这格请先在 VM 上: sudo apt install ros-humble-diagnostic-aggregator
+  (apt-cache 有候选版本, 说明只是没装, 不是源里没有)
+=== [9b] 收尾读数: 别把进程留给下一轮 ===
+  读数: 桥相关进程仍在 0 个; sim/gateway 仍在 0 个 (两边都应当 0)
+  PASS 收尾收干净了(不给下一轮埋跨轮污染) (=1)
+=== [9] 汇总 ===
+  PASS=12 FAIL=0 SKIP=1 PRED_OVERTURNED=0
+  注: SKIP 不算通过。本脚本对『告警沿标准诊断栈传播』这件事**没有任何证据**, 只有 bag 那几格。
+ALL_DOWNSTREAM_BAG_ASSERTS_PASS
+SCRIPT_DONE

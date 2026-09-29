@@ -51,6 +51,9 @@ DeviceMonitorPlatform/
 ├── tools/vm_ros2_build.sh      # colcon 构建 dmp_msgs/dmp_ros2_bridge + colcon test
 ├── tools/vm_e2e.sh             # 全链路冒烟: simulator→网关→桥→ROS2 话题/服务
 ├── tools/vm_qos_mismatch.sh    # QoS 错配四格矩阵取证 (实测推翻了我最初的假设)
+├── tools/vm_lifecycle_compose.sh # 生命周期主验收：[1]~[8] 两档（POISON=1 整轮 25 条、快档 16 条）
+├── tools/vm_downstream_bag.sh  # 下游联动：让生态组件 rosbag2 录/取/回放 `/dmp/frames` 并逐字段比（12 条）
+├── tools/diagnostics/          # 取证驱动与工具（run_vm_rounds.ps1 一条链：bundle→同步构建→跑→scp 取证据）+ evidence/ 原始读数
 ├── tools/vm_realdevice_e2e.sh  # 跨机真板验收: STM32→Windows 网关→VM 内 ROS2 话题/服务
 ├── e2e_realdevice.sh           # WSL: 真机全链路验收(网关→dmp_grpc_server→probe, 含证据输出)
 ├── firmware/                   # 下位机侧 (STM32F103 HAL), 与上位机共用帧内核
@@ -66,12 +69,13 @@ DeviceMonitorPlatform/
 └── docs/
     ├── adr/                    # 架构决策记录: ADR-001 接口分层/标准消息优先, ADR-002 下行只写判定层, ADR-003 桥生命周期化与组件化
     ├── architecture.md         # 架构设计
-    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~013) + 风险分析(R-001~008)
-    ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南
+    ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~013；SR-014~017 待实施) + 风险分析(R-001~009)
+    ├── 网关与服务链路优化方案.md   # DMP-OPT-001 待评审: 慢客户端隔离(R-009) / Qt 经网关取数 / 原生 Linux 形态 / 多设备纳管
+    ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南（WSL2 **仅作构建/工具链沙箱**，不作为交付运行环境，见 IEC62304 §1）
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
     ├── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
-    └── 经典Bug素材录.md         # 25 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
+    └── 经典Bug素材录.md         # 49 条真实 bug 的"现象→误判→根因→可讲点"，面试可直接讲
 ```
 
 ## 构建（核心，不依赖 Qt）
@@ -123,6 +127,11 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
    - **错误隔离**（R-008 姊妹项）：`gw_overrides:=bed01=127.0.0.1:0` 恰好是一条**真**的每设备 configure FAILURE（端口 0 是 C++ 侧本来就拒的值），不需要人造故障：bed01 停在 `unconfigured`、它自己的三个服务因 configure 没走完而不存在、同容器 bed02 的 `change_state` 仍在且能激活、照发 40 批（复跑轮 41 批）——**一个组件配置失败不传染其它组件，也不拆容器**（该格共 5 条断言）。
    - 两个回调组的理由因此以**收窄的形式恢复**：不再是“控制面繁忙会头阻塞”（已被 7 轮 A/B 证伪），而是“单个长回调会头阻塞，多线程容器免疫”。ADR-003 原本挂着“未覆盖”的最后一条边界（`on_shutdown`）本轮已闭合：六条断言两档各跑一次全绿（阳性对照 20 批→状态 `finalized`→回调日志 1 次→数据面 0 批→SIGINT 后 15s 内自退→退出码 0），整轮由 19 项长到 **25 项且实测 PASS=25 FAIL=0**（`POISON=0` 快档按设计跳过 [6][7]，给出 16/16；原始读数入库 `tools/diagnostics/evidence/c11_full_poison1.txt`）。详 `docs/adr/ADR-003` 末节之二、`ros2/README.md`、素材录 §8 B-37~B-45）
    - **顺手把验收尺子也修了一次**（素材录 B-40~B-42）：`[1]` 那条“unconfigured 时话题必须不存在”在第 2~4 轮各红一次、而首轮独绿——定因为**负断言读了 ros2-daemon 的图缓存**：实测一轮跑完、进程全没之后 +0s 仍是“现场=0 / daemon=1”，+15s 后两路才归零；那个过期窗口罩住了轮次间隔，所以红的那几次读的是**上一轮**的残留条目（而实测到的偏差方向只会造成假红，c8 那 10/10 不被推翻）。图上断言从此一律 `--no-daemon --spin-time 6`，并把两路读数同时打进日志。定因路上我自己错过的两步更值得讲：一个猜测（TERM 杀不掉被长回调占满的容器）被自己的探针**证伪**——TERM 在那种时刻只是延迟生效，退出时仍然道别；另一个更严重：取证探针里那句 `ros2 daemon stop` **把犯罪现场冲干净了**，导致之后连跑 4 轮全绿也不能拿来否证缓存假设——要定因只能用原始配方重跑一次。
+16. [x] **下游联动：换一个“不是我写的”证人**（e1，`tools/vm_downstream_bag.sh`，2026-09-29 VM 实跑 **`PASS=12 FAIL=0 SKIP=1`**）：前面那些断言的裁判都是我自己写的订阅方，这轮把 `/dmp/frames` 直接交给生态组件 **rosbag2** 存与回放——实测录到 **231 批**、metadata 认得自定义类型 `dmp_msgs/msg/DeviceFrameArray`，用 `rosbag2_py` 反序列化回来与实时侧**按 `seq` 的窗口逐字段一致**（live 160 / bag 308：找不到 0、字段不同 0），`ros2 bag play` 回放 200 帧同样一致。
+   - **比较口径不能图省事**：bag 录 16s、实时探针只盯 8s，两个窗长短不等，`cmp -s` 整文件必然红——那是脚本自己的错，不是链路的错。改成“短侧每一行按 `seq` 在长侧都能找到且六字段全同”。
+   - **回放前必须先把实时流关静默**，而静音**用生命周期门禁**（`deactivate` → 状态 `inactive` → 3s 内 0 帧两条断言）而不是 `kill -INT ros2 launch`：后者实测 15s 未退，跑完还在容器里留下两个孤儿进程（第二个要 `kill -9`）。首轮那格 `play.csv` 混进实时流导致的“200 帧找不到”，是这条前置条件没建立的下游症状——**两格一起红时，只有前一格是事故**。SIGINT 的退出语义由 `vm_lifecycle_compose.sh` 的 [8] 正式断言，不在这里重复。
+   - **一条我自己下的预设被实测推翻**：按 B-07 的 QoS 四格矩阵，不给 override 直接录应当静默零条，实测 **141/144 批** —— Humble 的 rosbag2 会先查发布端 offered QoS 再自建兼容订阅。所以“错配静默”的准确说法是**订阅端要求高于发布端能力时**，不是“任何下游”。这一格单独计数（`PRED_OVERTURNED`），旧预设与两个读数都留在脚本注释和 `tools/diagnostics/evidence/e1_bag_run1_fail.txt` 里——**改期望值只在能解释之后允许，且不许顺手改成实测值**。
+   - 新增 [9b] 收尾读数：按名字收干净并量到 `桥 0 个 / sim-gateway 0 个`，并在 VM 外侧用 `ps` 独立核过（不给下一轮埋跨轮污染）。`diagnostic_aggregator` 那格因 VM 的 sudo 需要密码**显式 SKIP**，不计入通过。
 
 ## 当前进度（本次已实现并本地验证 ✅）
 
@@ -168,3 +177,4 @@ $env:PATH="$Qt/6.10.0/mingw_64/bin;$Qt/Tools/mingw1310_64/bin;"+$env:PATH
 - CI 的 exit 1 并不等于“自检判 FAIL”：先用公开 API 拿到逐步结论，发现失败在**构建阶段**，后两步 skipped → **先定住“挂在哪一步”，再谈根因**；日志不可读就把根因 grep 成匿名可读的注解
 - 本地“全选”装了全部 Qt 模块，CI 的 `modules:` 白名单少一个 → **本地永远复现不了这个差异**；依赖清单存在两个不同构的声明面本身就是 bug
 - `timeout` 默认 SIGTERM 不 flush → 被杀进程丢块缓冲，**“0 条数据”可能是取证手段自己造的假**
+- 验收的证人换成生态组件（rosbag2 录/取/回放）而不是自己写的订阅方 → **“我测的和我信的是同一个东西”这条要怎么破**；顺带讲一条被实测推翻的预设：rosbag2 会探测发布端 offered QoS，所以“QoS 错配一定静默”不能外推到任何下游
