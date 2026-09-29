@@ -1,4 +1,4 @@
-# Bug 复盘与判断记录（52 条）
+# Bug 复盘与判断记录（54 条）
 
 > 用途：本文件是**调试复盘与经验教训记录**，对应 `docs/IEC62304-软件生命周期与风险管理.md` §6
 > 的缺陷登记链：每条都保留“当时我以为是什么”（误判路径），因为可复用的是排查路径而不只是结论。
@@ -64,6 +64,8 @@
 | B-50 | 我的验收探针自己死了，症状却**完全像**"生态组件没工作"（rclpy 把 uint8 给成 bytes） | 取证陷阱/方法论 |
 | B-51 | `kill $!` 只杀掉 `ros2 run` 的外壳：同一个脚本里两个阶段的读数互相污染 | 取证陷阱 |
 | B-52 | 七条断言当场全绿，可它证的比我说的少：0 对 0 的一致不是"告警传播" | 方法论/证据 |
+| B-53 | 改名与它的 9 处引用被拆进两次提交，中间那次在 main 上留了悬空引用，而 CI 全绿 | 方法论/证据 |
+| B-54 | 只钉 `CMAKE_CXX_COMPILER` 让 C 落到另一代 MinGW，链接报 `__p__commode` 的**假缺陷** | 构建系统/环境 |
 
 ---
 
@@ -913,7 +915,68 @@
 
 ---
 
-## 9. 追加模板
+## 9. 提交动作与构建环境（B-53~B-54）
+
+### B-53 ★★★ 改名与它的引用被拆进两次提交：main 上悬空 9 处，而 CI 全绿
+
+- **现象**：我提交 `2812ba2`（本意只是修 README 里一处写残的文件名），`git show --stat` 里却多出一个**我没做过的**
+  `rename docs/经典Bug素材录.md => docs/Bug复盘与判断记录.md (R100)`。CI Run#14 全绿。
+- **误判路径**：① 以为并行会话直接改了工作区文件（直接改文件 git 不会记成 rename）；② 以为 `git mv` 会自己提交
+  （它只写索引）；③ 以为自己确实提过一次改名（`git log` 里没有对应的 message）。三个都不成立，才回头去看索引。
+- **根因**：两条机制叠加 —— 并行会话的 `git mv` 把改名写进了**共享索引**，而我 `git commit` **不带 pathspec**，
+  提交的是"索引此刻的内容"而不是"我这轮改的那些文件"；那 9 处引用同步当时还在对方编辑器里没暂存，
+  于是**改名（R100）与它的引用被拆成两个提交**，中间那个提交状态能编译、能过测试，引用却是断的。
+- **修复**：`cbcf591` 一次把 9 处闭掉（HEAD 侧旧名计数 = 0）。约束三条，已写进 IEC §9：并行编辑期一律
+  `git commit -F <msg> -- <paths>`；改名与引用同步必须同一次提交，做不到就把改名放到最后一个提交；
+  提交前 `git status --short` 必须对得上"我以为的改动集"。
+- **判断**：CI 全绿的判据本来就不含文档间引用关系 —— 把它当成"仓库自洽"的证据是一次**类别错误**，
+  不是 CI 漏了什么。另一半更普适：`git commit` 不带 pathspec 时，**提交的边界由索引决定，而索引可以是别人正在用的**；
+  有并行会话时，"我这轮做了什么"这个心智模型和仓库实际收到的东西不是一回事。
+- **证据**：`git show --stat 2812ba2`（含那行 R100）；`git -c core.quotepath=false grep -n 经典Bug素材录 2812ba2`
+  = **9 行 / 7 个文件**（README:118,271；IEC:60；ADR-003:14；真机链路:56；优化方案:7,280；ros2/README:231；
+  tools/diagnostics/README:3）；同一命令在 `cbcf591` = 0 行。
+- **顺手一条（数这个数的检查自己两次交出假绿）**：`git grep -E '\u4e00-\u9fff'` —— POSIX ERE 不认 `\uXXXX` 转义，
+  模式退化成匹配字面串，**0 命中**；`git ls-files` 对 CJK 文件名做八进制转义，我把转义串直接喂给 `Test-Path`，
+  **全部判成不存在而跳过**，于是报出"引用全部 OK"。两个缺陷的失效方向**和"检查通过"长得一模一样**（只少报，不多报）。
+  我中途据此口头报过"5 处 / 4 个文件"，是错的，本条数字以 `git grep` 现算为准。修法：`git -c core.quotepath=false ls-files`
+  + .NET 正则，并且**命中数为 0 视同检查坏了**，检查里要留一个注定能报阳的样本。
+
+### B-54 ★★ 只钉了 CXX 编译器，C 就自己挑了另一代 MinGW：一个报成"代码坏了"的假缺陷
+
+- **现象**：为复验上面那轮改动，我新建 `build_verify` 配置整个工程，`ninja test_frame_parity` **链接失败**，
+  5 个 undefined reference（`__p__commode`、`__mingw_app_type`、`__mingw_initltssuo_force`、`__mingw_initltsdyn_force`、
+  `__mingw_initltsdrot_force`），报错位置全部指向 `.../mingw1310_64/.../lib/../lib/crt2.o:crtexe.c`。
+  同一份源码在既有 `build_ci_win` 里 `ctest` 5/5 通过，而那轮我只改了注释行与一处 echo 文案 —— 症状却像"我改坏了代码"。
+- **误判路径**：① 怀疑改名波及代码（逐条读那 13 个非文档文件的 diff，全落在 `//`、`#` 与 echo 里，排除）；
+  ② 怀疑 Qt 的 g++ 装坏了（`--version` = 13.1.0 正常，编译阶段全过，只在最后一步炸）；③ 怀疑链接顺序或 `-static`
+  —— 都对不上"报错符号来自 crt2.o"这一条。
+- **根因**：configure 时我只钉了 `-DCMAKE_CXX_COMPILER=<Qt 13.1 g++>`，**没钉 `-DCMAKE_C_COMPILER`**；
+  CMake 于是从 PATH 自选 gcc，解析到 `E:\mingw64\bin\gcc.exe` = **8.1.0**（这台机器的 PATH 里 `E:\mingw64\bin`
+  排在 Qt 之前，且重复出现两次）。于是 `firmware/dmp_frame_core.c` 由 8.1 编译、`windres`/`gcc-ar` 也落到 8.1，
+  而 CMake 把**探测 C 编译器得到的隐式链接目录**写进了链接行：
+  `-LE:/mingw64/lib/gcc/x86_64-w64-mingw32/8.1.0  -LE:/mingw64/lib/gcc  -LE:/mingw64/x86_64-w64-mingw32/lib  -LE:/mingw64/lib`
+  ⇒ 拿 13.1 的 `crt2.o` 去配 8.1 那套运行时，那几个 CRT 钩子符号找不到。
+- **修复**：把 C/CXX/RC 当**一组**钉，全指 `G:/Software/Qt/Tools/mingw1310_64/bin` —— 这正是 `build_ci_win`
+  的钉法（其 cache 里三项全指 Qt 那套，`build.ninja` 内 `E:/mingw64` 命中 0 行）。仓库侧不加工具链探测脚本：
+  本机 PATH 属于个人环境，不该由仓库来迁就。
+- **判断**：跨代 MinGW 不会在编译阶段出错（两代都能产出 obj），只会卡在链接 CRT 那一步，所以**报错符号一定来自
+  `crt2.o`** —— 见到 `__p__commode` / `__mingw_*_force` 这一类符号该直接想到工具链混代，而不是去读自己的业务代码。
+  更通用的一条：**"新配置目录报红"先按环境差异处理，判别动作是拿一个已知绿的同配置目录做对照**，改源码是第三步。
+  与 B-05/B-06 同族：都是构建系统在"静默"上出错，一个是不编译 `.c`，一个是自选了另一代编译器。
+- **证据**（双向现场复现；命令自包含，日志留在 gitignored 的 `build_tmp/` 下）：只钉 CXX →
+  `probe_mixed/CMakeCache.txt` 里 `CMAKE_C_COMPILER:FILEPATH=E:/mingw64/bin/gcc.exe`，构建输出 `FAILED: test_frame_parity.exe`
+  加同一串 undefined；两个都钉 → `probe_qtcc` configure rc=0、build rc=0，产出的 exe 跑出
+  `FRAME-PARITY: run=41 fail=0 -> ALL PASS`，其 `build.ninja` 内 `E:/mingw64` 命中 0 行。复现命令：
+  `cmake -S . -B <dir> -G Ninja -DCMAKE_MAKE_PROGRAM=<Qt>/Tools/Ninja/ninja.exe -DCMAKE_BUILD_TYPE=Release -DDMP_BUILD_QT=OFF -DDMP_BUILD_TESTS=ON [-DCMAKE_C_COMPILER=…] [-DCMAKE_CXX_COMPILER=…]`。
+- **两条自认（都出在"读数"上）**：① 反向对照那次日志里写着 `build rc=0`，那是假的 —— `Select-Object -First`
+  提前终止管道把 `$LASTEXITCODE` 冲掉了，真判据是 `FAILED:` 行本身；**经过滤管道之后的退出码不能当结论**。
+  ② 我曾用 `nm --defined-only` 想逐符号证明"两代库符号集不同"：第一版把 `nm` 输出的**归档成员名行**
+  （`lib64_libmsvcrt_extra_a-__p__commode.o:`）当成了符号定义行，第二版正则又漏了小写类型字母，两代都读出 0 命中 ——
+  这个读数不可信，所以本条结论只建立在链接器自己的报错与双向复现上，不引用库侧数字。
+
+---
+
+## 10. 追加模板
 
 ```markdown
 ### B-XX ★? <一句话标题>
