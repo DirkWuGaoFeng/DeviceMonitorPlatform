@@ -108,11 +108,11 @@ probe done.
 
 WSL2 从环境清单完全退役后，gRPC 服务层迁入**原生 Ubuntu 22.04 VM**并实跑做实。经 `tools/diagnostics/run_vm_rounds.ps1`（git bundle 同步 → VM 上 `bash tools/vm_grpc_build_run.sh` → 原始读数 scp 取回）：
 
-- **主机**：VM，`Ubuntu 22.04.5 LTS` / Linux `6.8.0-138-generic` / HEAD `42b757c`
+- **主机**：VM，`Ubuntu 22.04.5 LTS` / Linux `6.8.0-138-generic` / HEAD `4a2acde`
 - **依赖**：apt `grpc++ 1.30.2`、`protobuf 3.12.4`、`protoc` + `/usr/bin/grpc_cpp_plugin`
 - **构建**：`cmake -S service` 产出 `dmp_grpc_server` + `grpc_client_probe` → `ASSERT[build]=PASS`
 - **合成模式端到端**：`ASSERT[synthetic]=PASS (probe_rc=0 samples=10 crc_err=0)` —— `GetStats`/`GetAlarms`/`Subscribe(10 条)` 全通过
-- **RAW 上游订阅**：`ASSERT[raw_upstream]=PASS (订阅 127.0.0.1:9100: ok=48 samples=5 crc_err=0)` —— `grpc_server` 自起 `device_simulator` 作 TCP 帧源，发 `RAW\n` 逐字节收帧解码，48 帧零误、5 条样本流式到达（正流断言，非 0-对-0）
-- **结论行**：`PASS=2 TOTAL=2`（HEAD `42b757c`）
+- **RAW 上游订阅**：`ASSERT[raw_upstream]=PASS` —— 两种拓扑均跑通：① 直连 `device_simulator`（HEAD `42b757c`，`ok=48 samples=5 crc_err=0`）；② **经完整链路 `device_simulator:9000 → gateway_service:9100 → grpc_server`**（HEAD `4a2acde`，`ok=44 samples=5 crc_err=0`）—— 后者才是“grpc_server 作为**网关**的独立 RAW 订阅者”的原生 VM 版（发 `RAW\n` 逐字节收帧解码，正流断言非 0-对-0）
+- **结论行**：`PASS=2 TOTAL=2`（最新 HEAD `4a2acde`）
 
 > 判据由脚本本轮现算，非写死；`crc_err=0` 再次佐证帧协议内核在 Linux 侧与 Windows 字节级同源。

@@ -56,7 +56,7 @@ pwsh -NoProfile -File tools/diagnostics/run_vm_rounds.ps1 -RepoScript tools/vm_g
 [SUBSCRIBE] 接收 10 条实时样本:  SAMPLE ts=... seq=... ch=.. type=.. value=..
 probe done.
 ```
-最近一次实跑证据：`docs/grpc-verify-log.md` §6（原生 Ubuntu 22.04.5 / HEAD 42b757c：`ASSERT[synthetic]=PASS` + `ASSERT[raw_upstream]=PASS`（自起 device_simulator，ok=48 samples=5 crc_err=0）、`PASS=2 TOTAL=2`）。
+最近一次实跑证据：`docs/grpc-verify-log.md` §6（原生 Ubuntu 22.04.5 / HEAD 4a2acde：`ASSERT[synthetic]=PASS` + `ASSERT[raw_upstream]=PASS`（经 gateway_service 完整链路 sim→gw→grpc_server，ok=44 samples=5 crc_err=0）、`PASS=2 TOTAL=2`）。
 
 > 关键设计：合成模式自造 ~20Hz 四通道数据喂进真实 `Acquisition` 解码/告警链，**不依赖任何外部进程**，开箱即绿。
 
@@ -82,6 +82,10 @@ cmake --build build_linux_grpc -j
 `grpc_server` 上游模式：`./dmp_grpc_server <port> <host> <upstream_port>` —— 连一个 TCP 帧流源，
 **先送一行 `RAW\n` 再按字节收帧**（对 `device_simulator` 无害，对 `gateway_service` 开启 RAW 逐字节透传）。
 因此 `grpc_server` 与 ROS2 桥一样，是网关的**独立 RAW 订阅者**；一台 Linux 主机上两者可与 `gw_probe` 并存。
+
+一键自检（VM 上一步到位，`tools/vm_grpc_build_run.sh` 已内置两种拓扑）：
+- `WITH_SIM=1 bash tools/vm_grpc_build_run.sh` —— 脚本自起 `device_simulator` 作 RAW 源，`grpc_server` 直连它。
+- `VIA_GW=1 bash tools/vm_grpc_build_run.sh` —— 脚本起完整链路 `device_simulator:9000 → gateway_service:9100 → grpc_server`，证 `grpc_server` 订阅的是**网关**（非直连模拟器）；实测 `raw_upstream` ok=44 samples=5 crc_err=0（证据见 §6，HEAD 4a2acde）。两者均带正流断言（ok>0 且 samples≥5 且 crc_err=0），防 0-对-0 假过。
 
 ---
 
