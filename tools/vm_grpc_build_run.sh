@@ -19,6 +19,7 @@
 #   GRPC_PORT=50081 bash tools/vm_grpc_build_run.sh # 换端口(避开占用)
 #   GATEWAY=<host:port> bash tools/vm_grpc_build_run.sh  # 追加 RAW 上游订阅档(需网关已在跑)
 #   WITH_SIM=1 bash tools/vm_grpc_build_run.sh           # 自起 device_simulator 作 RAW 源跑上游订阅档(VM 一步到位)
+#   VIA_GW=1 bash tools/vm_grpc_build_run.sh             # 起完整链路 sim->gateway->grpc_server, 证订阅的是网关而非直连模拟器
 set +u
 set +e
 
@@ -87,9 +88,24 @@ else
 fi
 
 echo "=== [4] (可选) RAW 上游订阅档: server 连已在跑的网关/模拟器, 证 grpc_server 是网关的独立 RAW 订阅者 ==="
-SIM_PID=""
+SIM_PID=""; GW_PID=""
+# VIA_GW=1: 起完整拓扑 device_simulator -> gateway_service -> grpc_server, 证 grpc_server 订阅的是网关(非直连模拟器)
+if [ "${VIA_GW:-0}" -eq 1 ] && [ -z "${GATEWAY:-}" ]; then
+  SIMPORT="${SIMPORT:-9000}"; GWPORT="${GWPORT:-9100}"
+  SIMBIN="$REPO/build_linux/device_simulator"; GWBIN="$REPO/build_linux/gateway_service"
+  for B in "$SIMBIN" "$GWBIN"; do
+    [ -x "$B" ] || echo "  缺二进制: $B (先跑 vm_native_build.sh 或 top-level cmake 生成)"
+  done
+  if [ -x "$SIMBIN" ] && [ -x "$GWBIN" ]; then
+    "$SIMBIN" "$SIMPORT" >"$LOG_DIR/dmp_sim_$SIMPORT.log" 2>&1 & SIM_PID=$!; sleep 1.2
+    "$GWBIN" "$GWPORT" 127.0.0.1 "$SIMPORT" >"$LOG_DIR/dmp_gw_$GWPORT.log" 2>&1 & GW_PID=$!
+    for _ in $(seq 1 30); do grep -q "listening" "$LOG_DIR/dmp_gw_$GWPORT.log" 2>/dev/null && break; sleep 0.3; done
+    GATEWAY="127.0.0.1:$GWPORT"
+    echo "  拓扑: device_simulator:$SIMPORT -> gateway_service:$GWPORT -> grpc_server (RAW 订阅网关)"
+  fi
+fi
 # WITH_SIM=1: 自己把 device_simulator 拉起来当 RAW 源(它忽略非帧字节, grpc_server 的 RAW\n 无害)
-if [ "${WITH_SIM:-0}" -eq 1 ] && [ -z "${GATEWAY:-}" ]; then
+if [ "${WITH_SIM:-0}" -eq 1 ] && [ "${VIA_GW:-0}" -ne 1 ] && [ -z "${GATEWAY:-}" ]; then
   SIMPORT="${SIMPORT:-9100}"; SIMBIN="$REPO/build_linux/device_simulator"
   if [ ! -x "$SIMBIN" ]; then
     echo "  构建 device_simulator (top-level cmake, QT=OFF) ..."
@@ -127,6 +143,7 @@ if [ -n "${GATEWAY:-}" ]; then
 else
   echo "  ASSERT[raw_upstream]=SKIP  (未给 GATEWAY=host:port 且 WITH_SIM!=1 / 模拟器未就位)"
 fi
+[ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
 [ -n "${SIM_PID:-}" ] && kill "$SIM_PID" 2>/dev/null
 
 echo "=== [5] 结论 ==="
