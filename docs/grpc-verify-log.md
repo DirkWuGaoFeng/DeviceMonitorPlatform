@@ -108,10 +108,11 @@ probe done.
 
 WSL2 从环境清单完全退役后，gRPC 服务层迁入**原生 Ubuntu 22.04 VM**并实跑做实。经 `tools/diagnostics/run_vm_rounds.ps1`（git bundle 同步 → VM 上 `bash tools/vm_grpc_build_run.sh` → 原始读数 scp 取回）：
 
-- **主机**：VM，`Ubuntu 22.04.5 LTS` / Linux `6.8.0-138-generic` / HEAD `b852d6d`
+- **主机**：VM，`Ubuntu 22.04.5 LTS` / Linux `6.8.0-138-generic` / HEAD `42b757c`
 - **依赖**：apt `grpc++ 1.30.2`、`protobuf 3.12.4`、`protoc` + `/usr/bin/grpc_cpp_plugin`
 - **构建**：`cmake -S service` 产出 `dmp_grpc_server` + `grpc_client_probe` → `ASSERT[build]=PASS`
 - **合成模式端到端**：`ASSERT[synthetic]=PASS (probe_rc=0 samples=10 crc_err=0)` —— `GetStats`/`GetAlarms`/`Subscribe(10 条)` 全通过
-- **结论行**：`PASS=1 TOTAL=1`（`raw_upstream` 本轮无网关在场，显式 SKIP，不计入通过）
+- **RAW 上游订阅**：`ASSERT[raw_upstream]=PASS (订阅 127.0.0.1:9100: ok=48 samples=5 crc_err=0)` —— `grpc_server` 自起 `device_simulator` 作 TCP 帧源，发 `RAW\n` 逐字节收帧解码，48 帧零误、5 条样本流式到达（正流断言，非 0-对-0）
+- **结论行**：`PASS=2 TOTAL=2`（HEAD `42b757c`）
 
 > 判据由脚本本轮现算，非写死；`crc_err=0` 再次佐证帧协议内核在 Linux 侧与 Windows 字节级同源。

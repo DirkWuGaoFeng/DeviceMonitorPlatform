@@ -56,7 +56,7 @@ pwsh -NoProfile -File tools/diagnostics/run_vm_rounds.ps1 -RepoScript tools/vm_g
 [SUBSCRIBE] 接收 10 条实时样本:  SAMPLE ts=... seq=... ch=.. type=.. value=..
 probe done.
 ```
-最近一次实跑证据：`docs/grpc-verify-log.md` §6（原生 Ubuntu 22.04.5 / HEAD b852d6d）。
+最近一次实跑证据：`docs/grpc-verify-log.md` §6（原生 Ubuntu 22.04.5 / HEAD 42b757c：`ASSERT[synthetic]=PASS` + `ASSERT[raw_upstream]=PASS`（自起 device_simulator，ok=48 samples=5 crc_err=0）、`PASS=2 TOTAL=2`）。
 
 > 关键设计：合成模式自造 ~20Hz 四通道数据喂进真实 `Acquisition` 解码/告警链，**不依赖任何外部进程**，开箱即绿。
 
