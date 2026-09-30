@@ -18,6 +18,7 @@
 #   INSTALL=1 bash tools/vm_grpc_build_run.sh       # 强制先 apt 装 gRPC/protobuf(首次上机)
 #   GRPC_PORT=50081 bash tools/vm_grpc_build_run.sh # 换端口(避开占用)
 #   GATEWAY=<host:port> bash tools/vm_grpc_build_run.sh  # 追加 RAW 上游订阅档(需网关已在跑)
+#   WITH_SIM=1 bash tools/vm_grpc_build_run.sh           # 自起 device_simulator 作 RAW 源跑上游订阅档(VM 一步到位)
 set +u
 set +e
 
@@ -85,26 +86,48 @@ else
   kill "$SRV_PID" 2>/dev/null
 fi
 
-echo "=== [4] (可选) RAW 上游订阅档: server 连已在跑的网关, 证 grpc_server 是网关的独立 RAW 订阅者 ==="
+echo "=== [4] (可选) RAW 上游订阅档: server 连已在跑的网关/模拟器, 证 grpc_server 是网关的独立 RAW 订阅者 ==="
+SIM_PID=""
+# WITH_SIM=1: 自己把 device_simulator 拉起来当 RAW 源(它忽略非帧字节, grpc_server 的 RAW\n 无害)
+if [ "${WITH_SIM:-0}" -eq 1 ] && [ -z "${GATEWAY:-}" ]; then
+  SIMPORT="${SIMPORT:-9100}"; SIMBIN="$REPO/build_linux/device_simulator"
+  if [ ! -x "$SIMBIN" ]; then
+    echo "  构建 device_simulator (top-level cmake, QT=OFF) ..."
+    cmake -S "$REPO" -B "$REPO/build_linux" -DDMP_BUILD_QT=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
+    cmake --build "$REPO/build_linux" -j"$(nproc)" --target device_simulator 2>&1 | tail -3
+  fi
+  if [ -x "$SIMBIN" ]; then
+    "$SIMBIN" "$SIMPORT" >"$LOG_DIR/dmp_sim_$SIMPORT.log" 2>&1 &
+    SIM_PID=$!; sleep 1.5
+    GATEWAY="127.0.0.1:$SIMPORT"
+    echo "  已起 device_simulator :$SIMPORT (pid=$SIM_PID) 作 RAW 源"
+  fi
+fi
 if [ -n "${GATEWAY:-}" ]; then
   TOTAL=$((TOTAL+1))
   GH="${GATEWAY%%:*}"; GP="${GATEWAY##*:}"
   "$SRV" "$((PORT+1))" "$GH" "$GP" >"$LOG_DIR/dmp_grpc_up_$PORT.log" 2>&1 &
   UP_PID=$!
   for _ in $(seq 1 30); do grep -q "listening on" "$LOG_DIR/dmp_grpc_up_$PORT.log" 2>/dev/null && break; sleep 0.3; done
-  sleep 1.5
+  sleep 2
   "$PRB" "127.0.0.1:$((PORT+1))" 5 >"$LOG_DIR/dmp_grpc_upprobe_$PORT.log" 2>&1
   URC=$?
+  UOK=$(sed -n 's/.*ok=\([0-9]*\).*/\1/p' "$LOG_DIR/dmp_grpc_upprobe_$PORT.log" | head -1)
   UCRC=$(sed -n 's/.*crc_err=\([0-9]*\).*/\1/p' "$LOG_DIR/dmp_grpc_upprobe_$PORT.log" | head -1)
-  if [ "$URC" -eq 0 ] && [ "${UCRC:-1}" -eq 0 ]; then
-    echo "  ASSERT[raw_upstream]=PASS  (订阅 $GATEWAY 经 gRPC 转发, crc_err=$UCRC)"; PASSED=$((PASSED+1))
+  UNS=$(grep -c "SAMPLE ts=" "$LOG_DIR/dmp_grpc_upprobe_$PORT.log")
+  # 阳性对照(防 0-对-0 陷阱, B-52): 必须真有帧流过 RAW 且解码零误 —— ok>0 且收到>=5 样本 且 crc_err==0
+  if [ "$URC" -eq 0 ] && [ "${UOK:-0}" -gt 0 ] && [ "${UNS:-0}" -ge 5 ] && [ "${UCRC:-1}" -eq 0 ]; then
+    echo "  ASSERT[raw_upstream]=PASS  (订阅 $GATEWAY: ok=$UOK samples=$UNS crc_err=$UCRC)"; PASSED=$((PASSED+1))
   else
-    echo "  ASSERT[raw_upstream]=FAIL  (rc=$URC crc_err=${UCRC:-NA} —— 网关 $GATEWAY 是否在跑/可达?)"
+    echo "  ASSERT[raw_upstream]=FAIL  (rc=$URC ok=${UOK:-NA} samples=${UNS:-NA} crc_err=${UCRC:-NA} —— $GATEWAY 是否在发帧?)"
+    echo "  ---- 上游 server 尾 ----"; tail -4 "$LOG_DIR/dmp_grpc_up_$PORT.log"
+    echo "  ---- 上游 probe 尾 ----"; tail -6 "$LOG_DIR/dmp_grpc_upprobe_$PORT.log"
   fi
   kill "$UP_PID" 2>/dev/null
 else
-  echo "  ASSERT[raw_upstream]=SKIP  (未给 GATEWAY=host:port; 合成档已足以证 gRPC 迁至原生 Linux 做实)"
+  echo "  ASSERT[raw_upstream]=SKIP  (未给 GATEWAY=host:port 且 WITH_SIM!=1 / 模拟器未就位)"
 fi
+[ -n "${SIM_PID:-}" ] && kill "$SIM_PID" 2>/dev/null
 
 echo "=== [5] 结论 ==="
 echo "  PASS=$PASSED TOTAL=$TOTAL"
