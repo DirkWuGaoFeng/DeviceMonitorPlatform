@@ -1,6 +1,7 @@
 # gRPC 服务层验证日志（可复现证据）
 
-> 本文记录 `service/grpc_server.cpp` 真 gRPC 服务在 **WSL2** 上的一次完整"构建 + 端到端自检"通过实况，作为作品集的**可验证证据**。所有输出为真实运行结果（非模拟）。
+> 本文记录 `service/grpc_server.cpp` 真 gRPC 服务的一次完整"构建 + 端到端自检"通过实况，作为作品集的**可验证证据**。所有输出为真实运行结果（非模拟）。
+> §1~§5 那次跑在 **WSL2**（2026-09-28，历史记录）；WSL2 退役后，§6 是迁至**原生 Ubuntu 22.04 VM** 的复跑实况（2026-09-30）——**口径以 §6 为准**。
 
 - **日期**：2026-09-28
 - **主机**：Windows，经 `wsl.exe` 进入
@@ -100,3 +101,17 @@ probe done.
 3. **WSL2 真 gRPC 服务** —— `service/grpc_server.cpp`（本文，实测 `ok=120` + 流式订阅 + 告警）
 
 三者共用同一 `dmp::Acquisition` 解码/告警内核，业务层不动、只换传输层——可现场演示。
+
+---
+
+## 6. 迁移到原生 Linux / VM 复跑（2026-09-30，WSL2 退役后）
+
+WSL2 从环境清单完全退役后，gRPC 服务层迁入**原生 Ubuntu 22.04 VM**并实跑做实。经 `tools/diagnostics/run_vm_rounds.ps1`（git bundle 同步 → VM 上 `bash tools/vm_grpc_build_run.sh` → 原始读数 scp 取回）：
+
+- **主机**：VM，`Ubuntu 22.04.5 LTS` / Linux `6.8.0-138-generic` / HEAD `b852d6d`
+- **依赖**：apt `grpc++ 1.30.2`、`protobuf 3.12.4`、`protoc` + `/usr/bin/grpc_cpp_plugin`
+- **构建**：`cmake -S service` 产出 `dmp_grpc_server` + `grpc_client_probe` → `ASSERT[build]=PASS`
+- **合成模式端到端**：`ASSERT[synthetic]=PASS (probe_rc=0 samples=10 crc_err=0)` —— `GetStats`/`GetAlarms`/`Subscribe(10 条)` 全通过
+- **结论行**：`PASS=1 TOTAL=1`（`raw_upstream` 本轮无网关在场，显式 SKIP，不计入通过）
+
+> 判据由脚本本轮现算，非写死；`crc_err=0` 再次佐证帧协议内核在 Linux 侧与 Windows 字节级同源。

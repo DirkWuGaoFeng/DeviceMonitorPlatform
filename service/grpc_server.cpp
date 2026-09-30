@@ -9,7 +9,7 @@
 //
 // 两种上游(命令行选择):
 //   合成模式(默认, WSL 内自洽): 后台按 ~20Hz 造 4 通道数据(偶发越界->告警), 不依赖任何外部进程;
-//   上游模式: 连 device_simulator 的 TCP 帧流(需与模拟器同网络可达, 见 docs/WSL-gRPC-落地指南.md)。
+//   上游模式: 连 device_simulator 的 TCP 帧流(需与模拟器同网络可达, 见 docs/Linux-gRPC-服务层落地指南.md)。
 //
 // 运行: ./dmp_grpc_server 50051                 # 合成模式, 监听 :50051
 //       ./dmp_grpc_server 50051 127.0.0.1 9000  # 连上游模拟器

@@ -112,7 +112,7 @@ DeviceMonitorPlatform/
     ├── architecture.md         # 架构设计
     ├── IEC62304-软件生命周期与风险管理.md   # 合规文档 + 可追溯矩阵(SR-001~013；SR-014~017 待实施) + 风险分析(R-001~009)
     ├── 网关与服务链路优化方案.md   # DMP-OPT-001 v1.1 已定案、待实施: 慢客户端隔离(R-009) / Qt 经网关取数 / 原生 Linux 形态 / 多设备纳管
-    ├── WSL-gRPC-落地指南.md      # 在 WSL2 把 proto 契约编成真 gRPC 服务的分步指南（WSL2 **仅作构建/工具链沙箱**，不作为交付运行环境，见 IEC62304 §1）
+    ├── Linux-gRPC-服务层落地指南.md # 在原生 Ubuntu 22.04(VM/工控机) 把 proto 契约编成真 gRPC 服务的分步指南（Linux 侧唯一环境；WSL2 已退役，见 IEC62304 §1）
     ├── grpc-verify-log.md        # gRPC 服务层一次完整构建+端到端自检通过的真实输出(可复现证据)
     ├── 真机链路-STM32到上位机.md  # 固件并入 Keil + 刷录 + 串口验收 + 真机→gRPC 全链路 端到端 bring-up
     ├── 运维Agent-诊断指南.md      # 自然语言→告警归因：Agent 工具化网关命令 + 离线/LLM 双模式
@@ -202,7 +202,7 @@ bash wsl_setup.sh --run      # 构建后前台启动 server
 bash e2e_realdevice.sh <windows_ip>   # 真机全链路: 串口 -> Windows 网关(:9100) -> WSL gRPC(:50051) -> probe
 ```
 
-分步说明 `docs/WSL-gRPC-落地指南.md`；一次完整通过的真实输出 `docs/grpc-verify-log.md`。
+分步说明 `docs/Linux-gRPC-服务层落地指南.md`；一次完整通过的真实输出 `docs/grpc-verify-log.md`（§6 为原生 VM 实跑）。
 
 ### ROS2 桥与下游验收（Ubuntu 22.04 VM + Humble）
 
